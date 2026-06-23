@@ -417,6 +417,15 @@ public interface ConnectorMetadata
     }
 
     /**
+     * Set the default value for the specified column for future writes.
+     * The exact semantics are connector-defined.
+     */
+    default void setColumnDefault(ConnectorSession session, ConnectorTableHandle tableHandle, String columnName, Object defaultValue)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "This connector does not support setting column defaults");
+    }
+
+    /**
      * Drop the specified column
      */
     default void dropColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column)
@@ -452,6 +461,14 @@ public interface ConnectorMetadata
                 .collect(toList());
 
         return Optional.of(new ConnectorNewTableLayout(partitioningHandle, partitionColumns));
+    }
+
+    /**
+     * Set the specified column type
+     */
+    default void setColumnType(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column, Type type)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "This connector does not support setting column types");
     }
 
     /**
@@ -503,6 +520,22 @@ public interface ConnectorMetadata
     }
 
     /**
+     * Begin the atomic creation of a vector index with data.
+     */
+    default ConnectorOutputTableHandle beginCreateVectorIndex(ConnectorSession session, ConnectorTableMetadata indexMetadata, Optional<ConnectorNewTableLayout> layout, SchemaTableName sourceTableName)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "This connector does not support creating vector indexes");
+    }
+
+    /**
+     * Finish a vector index creation with data after the data is written.
+     */
+    default Optional<ConnectorOutputMetadata> finishCreateVectorIndex(ConnectorSession session, ConnectorOutputTableHandle tableHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "This connector does not support creating vector indexes");
+    }
+
+    /**
      * Start a SELECT/UPDATE/INSERT/DELETE query. This notification is triggered after the planning phase completes.
      */
     default void beginQuery(ConnectorSession session) {}
@@ -515,7 +548,24 @@ public interface ConnectorMetadata
 
     /**
      * Begin insert query
+     *
+     * @param session the session
+     * @param tableHandle the table handle
+     * @param insertColumnNames the list of column names that are explicitly specified in the INSERT statement.
+     *                          This allows connectors to distinguish between columns that are omitted (and should
+     *                          use default values) versus columns that are explicitly set to NULL.
+     *                          An empty list indicates no explicit column specification (e.g. INSERT INTO table VALUES ...),
+     *                          which implies inserting into all columns.
      */
+    default ConnectorInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle, List<String> insertColumnNames)
+    {
+        return beginInsert(session, tableHandle);
+    }
+
+    /**
+     * @deprecated Use {@link #beginInsert(ConnectorSession, ConnectorTableHandle, List)} instead
+     */
+    @Deprecated
     default ConnectorInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         throw new PrestoException(NOT_SUPPORTED, "This connector does not support inserts");
@@ -765,6 +815,14 @@ public interface ConnectorMetadata
     default void dropMaterializedView(ConnectorSession session, SchemaTableName viewName)
     {
         throw new PrestoException(NOT_SUPPORTED, "This connector does not support dropping materialized views");
+    }
+
+    /**
+     * Set properties on the specified materialized view.
+     */
+    default void setMaterializedViewProperties(ConnectorSession session, SchemaTableName viewName, Map<String, Object> properties)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "This connector does not support setting materialized view properties");
     }
 
     /**

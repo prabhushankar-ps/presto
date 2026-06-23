@@ -32,6 +32,7 @@ import com.facebook.presto.spi.MaterializedViewStatus;
 import com.facebook.presto.spi.MergeHandle;
 import com.facebook.presto.spi.NewTableLayout;
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.SystemTable;
 import com.facebook.presto.spi.TableHandle;
 import com.facebook.presto.spi.TableLayoutFilterCoverage;
@@ -69,6 +70,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 
+import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
 import static com.facebook.presto.spi.TableLayoutFilterCoverage.NOT_APPLICABLE;
 
 public interface Metadata
@@ -237,9 +239,19 @@ public interface Metadata
     void renameColumn(Session session, TableHandle tableHandle, ColumnHandle source, String target);
 
     /**
+     * Set the default value for the specified column
+     */
+    void setColumnDefault(Session session, TableHandle tableHandle, String columnName, Object defaultValue);
+
+    /**
      * Add the specified column to the table.
      */
     void addColumn(Session session, TableHandle tableHandle, ColumnMetadata column);
+
+    /**
+     * Set the specified type to the column.
+     */
+    void setColumnType(Session session, TableHandle tableHandle, ColumnHandle column, Type type);
 
     /**
      * Drop the specified column.
@@ -269,6 +281,22 @@ public interface Metadata
      * Finish a table creation with data after the data is written.
      */
     Optional<ConnectorOutputMetadata> finishCreateTable(Session session, OutputTableHandle tableHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics);
+
+    /**
+     * Begin the atomic creation of a vector index with data.
+     */
+    default OutputTableHandle beginCreateVectorIndex(Session session, String catalogName, ConnectorTableMetadata indexMetadata, Optional<NewTableLayout> layout, SchemaTableName sourceTableName)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "This connector does not support creating vector indexes");
+    }
+
+    /**
+     * Finish a vector index creation with data after the data is written.
+     */
+    default Optional<ConnectorOutputMetadata> finishCreateVectorIndex(Session session, OutputTableHandle tableHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "This connector does not support creating vector indexes");
+    }
 
     Optional<NewTableLayout> getInsertLayout(Session session, TableHandle target);
 
@@ -305,8 +333,14 @@ public interface Metadata
 
     /**
      * Begin insert query
+     *
+     * @param session the session
+     * @param tableHandle the table handle
+     * @param insertColumnNames the list of column names that are explicitly specified in the INSERT statement.
+     *                          An empty list indicates no explicit column specification (e.g. INSERT INTO table VALUES ...),
+     *                          which implies inserting into all columns.
      */
-    InsertTableHandle beginInsert(Session session, TableHandle tableHandle);
+    InsertTableHandle beginInsert(Session session, TableHandle tableHandle, List<String> insertColumnNames);
 
     /**
      * Finish insert query
@@ -440,6 +474,11 @@ public interface Metadata
      * Drops the specified materialized view.
      */
     void dropMaterializedView(Session session, QualifiedObjectName viewName);
+
+    /**
+     * Set properties on the specified materialized view.
+     */
+    void setMaterializedViewProperties(Session session, QualifiedObjectName viewName, Map<String, Object> properties);
 
     /**
      * List materialized views in the specified schema prefix.

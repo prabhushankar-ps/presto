@@ -79,6 +79,8 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static com.facebook.presto.common.resourceGroups.QueryType.DELETE;
+import static com.facebook.presto.common.resourceGroups.QueryType.UPDATE;
 import static com.facebook.presto.hive.BaseHiveColumnHandle.ColumnType.PARTITION_KEY;
 import static com.facebook.presto.hive.BaseHiveColumnHandle.ColumnType.REGULAR;
 import static com.facebook.presto.iceberg.FileContent.EQUALITY_DELETES;
@@ -137,11 +139,16 @@ public class IcebergEqualityDeleteAsJoin
     {
         int maxDeleteColumns = getDeleteAsJoinRewriteMaxDeleteColumns(session);
         checkArgument(maxDeleteColumns >= 0, "maxDeleteColumns must be non-negative, got %s", maxDeleteColumns);
-        if (!isDeleteToJoinPushdownEnabled(session) || maxDeleteColumns == 0) {
+        if (!isDeleteToJoinPushdownEnabled(session) || maxDeleteColumns == 0 || isDeleteOrUpdateQuery(session)) {
             return maxSubplan;
         }
         return rewriteWith(new DeleteAsJoinRewriter(functionResolution,
                 transactionManager, idAllocator, session, typeManager, variableAllocator), maxSubplan);
+    }
+
+    private boolean isDeleteOrUpdateQuery(ConnectorSession session)
+    {
+        return session.getQueryType().map(t -> t == DELETE || t == UPDATE).orElse(false);
     }
 
     private static class DeleteAsJoinRewriter
@@ -351,6 +358,7 @@ public class IcebergEqualityDeleteAsJoin
                     new IcebergTableName(tableName.getTableName(),
                             IcebergTableType.EQUALITY_DELETES, // Read equality deletes instead of data
                             tableName.getSnapshotId(),
+                            tableName.getBranchName(),
                             Optional.empty()),
                     icebergTableHandle.isSnapshotSpecified(),
                     icebergTableHandle.getOutputPath(),
@@ -382,6 +390,7 @@ public class IcebergEqualityDeleteAsJoin
                     new IcebergTableName(tableName.getTableName(),
                             IcebergTableType.DATA_WITHOUT_EQUALITY_DELETES, // Don't apply equality deletes in the split
                             tableName.getSnapshotId(),
+                            tableName.getBranchName(),
                             tableName.getChangelogEndSnapshot()),
                     icebergTableHandle.isSnapshotSpecified(),
                     icebergTableHandle.getOutputPath(),

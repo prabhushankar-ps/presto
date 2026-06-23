@@ -15,13 +15,18 @@
 #include <gtest/gtest.h>
 #include "presto_cpp/main/connectors/HivePrestoToVeloxConnector.h"
 #include "presto_cpp/main/connectors/IcebergPrestoToVeloxConnector.h"
+#include "presto_cpp/main/connectors/PrestoToVeloxConnectorUtils.h"
 #include "presto_cpp/main/types/PrestoToVeloxExpr.h"
 #include "presto_cpp/presto_protocol/connector/hive/HiveConnectorProtocol.h"
 #include "presto_cpp/presto_protocol/connector/iceberg/IcebergConnectorProtocol.h"
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/common/encode/Base64.h"
 #include "velox/connectors/hive/HiveConnector.h"
+#include "velox/connectors/hive/HiveDataSink.h"
 #include "velox/connectors/hive/TableHandle.h"
 #include "velox/connectors/hive/iceberg/IcebergColumnHandle.h"
+#include "velox/serializers/PrestoSerializer.h"
+#include "velox/type/Filter.h"
 
 using namespace facebook::presto;
 using namespace facebook::velox;
@@ -206,6 +211,49 @@ protocol::iceberg::IcebergColumnHandle createIcebergColumnHandle(
   return column;
 }
 
+std::shared_ptr<protocol::Block> serializeToBlock(
+    const VectorPtr& vector,
+    memory::MemoryPool* pool) {
+  serializer::presto::PrestoVectorSerde serde;
+  std::ostringstream output;
+  serde.serializeSingleColumn(vector, nullptr, pool, &output);
+  const auto serialized = output.str();
+  auto block = std::make_shared<protocol::Block>();
+  block->data = encoding::Base64::encode(serialized.c_str(), serialized.size());
+  return block;
+}
+
+protocol::Domain createSingleRangeDomain(
+    const std::string& typeStr,
+    std::shared_ptr<protocol::Block> lowBlock,
+    protocol::Bound lowBound,
+    std::shared_ptr<protocol::Block> highBlock,
+    protocol::Bound highBound,
+    bool nullAllowed) {
+  protocol::Marker lowMarker;
+  lowMarker.type = typeStr;
+  lowMarker.valueBlock = std::move(lowBlock);
+  lowMarker.bound = lowBound;
+
+  protocol::Marker highMarker;
+  highMarker.type = typeStr;
+  highMarker.valueBlock = std::move(highBlock);
+  highMarker.bound = highBound;
+
+  protocol::Range range;
+  range.low = lowMarker;
+  range.high = highMarker;
+
+  auto rangeSet = std::make_shared<protocol::SortedRangeSet>();
+  rangeSet->type = typeStr;
+  rangeSet->ranges = {range};
+
+  protocol::Domain domain;
+  domain.values = rangeSet;
+  domain.nullAllowed = nullAllowed;
+  return domain;
+}
+
 } // namespace
 
 TEST_F(PrestoToVeloxConnectorTest, icebergColumnHandleSimple) {
@@ -292,4 +340,294 @@ TEST_F(PrestoToVeloxConnectorTest, icebergColumnHandleDeeplyNested) {
   EXPECT_EQ(icebergHandle->field().children[0].fieldId, 2);
   ASSERT_EQ(icebergHandle->field().children[0].children.size(), 1);
   EXPECT_EQ(icebergHandle->field().children[0].children[0].fieldId, 3);
+}
+
+TEST_F(PrestoToVeloxConnectorTest, ctasPassesTextfileSerdeParameters) {
+  auto hiveOutputTableHandle =
+      std::make_shared<protocol::hive::HiveOutputTableHandle>();
+  hiveOutputTableHandle->schemaName = "test_schema";
+  hiveOutputTableHandle->tableName = "test_table";
+  hiveOutputTableHandle->tableOwner = "owner";
+  hiveOutputTableHandle->actualStorageFormat =
+      protocol::hive::HiveStorageFormat::TEXTFILE;
+  hiveOutputTableHandle->tableStorageFormat =
+      protocol::hive::HiveStorageFormat::TEXTFILE;
+  hiveOutputTableHandle->partitionStorageFormat =
+      protocol::hive::HiveStorageFormat::TEXTFILE;
+  hiveOutputTableHandle->compressionCodec =
+      protocol::hive::HiveCompressionCodec::NONE;
+  hiveOutputTableHandle->locationHandle.targetPath = "/path/to/target";
+  hiveOutputTableHandle->locationHandle.writePath = "/path/to/write";
+  hiveOutputTableHandle->locationHandle.tableType =
+      protocol::hive::TableType::NEW;
+  hiveOutputTableHandle->additionalTableParameters = {
+      {"field.delim", "|"},
+      {"escape.delim", "\\"},
+      {"collection.delim", "$"},
+      {"mapkey.delim", "#"},
+      {"presto.version", "0.297"}};
+
+  protocol::OutputTableHandle outputHandle;
+  outputHandle.connectorId = "hive";
+  outputHandle.connectorHandle = hiveOutputTableHandle;
+
+  protocol::CreateHandle createHandle;
+  createHandle.handle = outputHandle;
+
+  HivePrestoToVeloxConnector hiveConnector("hive");
+  auto result =
+      hiveConnector.toVeloxInsertTableHandle(&createHandle, *typeParser_);
+  ASSERT_NE(result, nullptr);
+
+  auto* hiveInsert =
+      dynamic_cast<connector::hive::HiveInsertTableHandle*>(result.get());
+  ASSERT_NE(hiveInsert, nullptr);
+
+  const auto& serdeParams = hiveInsert->serdeParameters();
+  // Only serde keys should be extracted, not table-level keys like
+  // presto.version.
+  EXPECT_EQ(serdeParams.size(), 4);
+  EXPECT_EQ(serdeParams.at("field.delim"), "|");
+  EXPECT_EQ(serdeParams.at("escape.delim"), "\\");
+  EXPECT_EQ(serdeParams.at("collection.delim"), "$");
+  EXPECT_EQ(serdeParams.at("mapkey.delim"), "#");
+}
+
+TEST_F(PrestoToVeloxConnectorTest, ctasPassesNimbleSerdeParameters) {
+  auto hiveOutputTableHandle =
+      std::make_shared<protocol::hive::HiveOutputTableHandle>();
+  hiveOutputTableHandle->schemaName = "test_schema";
+  hiveOutputTableHandle->tableName = "test_table";
+  hiveOutputTableHandle->tableOwner = "owner";
+  hiveOutputTableHandle->actualStorageFormat =
+      protocol::hive::HiveStorageFormat::ALPHA;
+  hiveOutputTableHandle->tableStorageFormat =
+      protocol::hive::HiveStorageFormat::ALPHA;
+  hiveOutputTableHandle->partitionStorageFormat =
+      protocol::hive::HiveStorageFormat::ALPHA;
+  hiveOutputTableHandle->compressionCodec =
+      protocol::hive::HiveCompressionCodec::NONE;
+  hiveOutputTableHandle->locationHandle.targetPath = "/path/to/target";
+  hiveOutputTableHandle->locationHandle.writePath = "/path/to/write";
+  hiveOutputTableHandle->locationHandle.tableType =
+      protocol::hive::TableType::NEW;
+  hiveOutputTableHandle->additionalTableParameters = {
+      {"nimble.stats.enable_vectorized", "true"},
+      {"nimble.index.columns", "id"},
+      {"alpha.encodingselection.read.factors",
+       "Constant=1.0;Trivial=0.7;FixedBitWidth=0.7;MainlyConstant=1.0;"
+       "SparseBool=1.0;Dictionary=1.0;RLE=1.0;Varint=1.0"},
+      {"presto.version", "0.297"}};
+
+  protocol::OutputTableHandle outputHandle;
+  outputHandle.connectorId = "hive";
+  outputHandle.connectorHandle = hiveOutputTableHandle;
+
+  protocol::CreateHandle createHandle;
+  createHandle.handle = outputHandle;
+
+  HivePrestoToVeloxConnector hiveConnector("hive");
+  auto result =
+      hiveConnector.toVeloxInsertTableHandle(&createHandle, *typeParser_);
+  ASSERT_NE(result, nullptr);
+
+  auto* hiveInsert =
+      dynamic_cast<connector::hive::HiveInsertTableHandle*>(result.get());
+  ASSERT_NE(hiveInsert, nullptr);
+
+  const auto& serdeParams = hiveInsert->serdeParameters();
+  EXPECT_EQ(serdeParams.size(), 3);
+  EXPECT_EQ(serdeParams.at("nimble.stats.enable_vectorized"), "true");
+  EXPECT_EQ(serdeParams.at("nimble.index.columns"), "id");
+  EXPECT_EQ(
+      serdeParams.at("alpha.encodingselection.read.factors"),
+      "Constant=1.0;Trivial=0.7;FixedBitWidth=0.7;MainlyConstant=1.0;"
+      "SparseBool=1.0;Dictionary=1.0;RLE=1.0;Varint=1.0");
+}
+
+TEST_F(PrestoToVeloxConnectorTest, ctasEmptySerdeParameters) {
+  auto hiveOutputTableHandle =
+      std::make_shared<protocol::hive::HiveOutputTableHandle>();
+  hiveOutputTableHandle->schemaName = "test_schema";
+  hiveOutputTableHandle->tableName = "test_table";
+  hiveOutputTableHandle->tableOwner = "owner";
+  hiveOutputTableHandle->actualStorageFormat =
+      protocol::hive::HiveStorageFormat::DWRF;
+  hiveOutputTableHandle->tableStorageFormat =
+      protocol::hive::HiveStorageFormat::DWRF;
+  hiveOutputTableHandle->partitionStorageFormat =
+      protocol::hive::HiveStorageFormat::DWRF;
+  hiveOutputTableHandle->compressionCodec =
+      protocol::hive::HiveCompressionCodec::NONE;
+  hiveOutputTableHandle->locationHandle.targetPath = "/path/to/target";
+  hiveOutputTableHandle->locationHandle.writePath = "/path/to/write";
+  hiveOutputTableHandle->locationHandle.tableType =
+      protocol::hive::TableType::NEW;
+
+  protocol::OutputTableHandle outputHandle;
+  outputHandle.connectorId = "hive";
+  outputHandle.connectorHandle = hiveOutputTableHandle;
+
+  protocol::CreateHandle createHandle;
+  createHandle.handle = outputHandle;
+
+  HivePrestoToVeloxConnector hiveConnector("hive");
+  auto result =
+      hiveConnector.toVeloxInsertTableHandle(&createHandle, *typeParser_);
+  ASSERT_NE(result, nullptr);
+
+  auto* hiveInsert =
+      dynamic_cast<connector::hive::HiveInsertTableHandle*>(result.get());
+  ASSERT_NE(hiveInsert, nullptr);
+
+  EXPECT_TRUE(hiveInsert->serdeParameters().empty());
+}
+
+TEST_F(PrestoToVeloxConnectorTest, hiveInsertTableHandleTableParameters) {
+  auto protoHandle = std::make_shared<protocol::hive::HiveInsertTableHandle>();
+  protoHandle->_type = "hive";
+
+  protocol::hive::HiveColumnHandle col;
+  col.name = "col1";
+  col.hiveType = "int";
+  col.typeSignature = "integer";
+  col.columnType = protocol::hive::ColumnType::REGULAR;
+  protoHandle->inputColumns = {col};
+
+  protoHandle->locationHandle.targetPath = "/target";
+  protoHandle->locationHandle.writePath = "/write";
+  protoHandle->locationHandle.tableType = protocol::hive::TableType::EXISTING;
+
+  protoHandle->actualStorageFormat = protocol::hive::HiveStorageFormat::DWRF;
+  protoHandle->compressionCodec = protocol::hive::HiveCompressionCodec::NONE;
+
+  auto table = std::make_shared<protocol::hive::Table>();
+  table->storage.parameters = {{"param1", "value1"}, {"param2", "value2"}};
+  protoHandle->pageSinkMetadata.table = table;
+
+  protocol::InsertHandle insertHandle;
+  insertHandle.handle.connectorHandle = protoHandle;
+  insertHandle.handle.connectorId = "hive";
+
+  HivePrestoToVeloxConnector hiveConnector("hive");
+  auto result =
+      hiveConnector.toVeloxInsertTableHandle(&insertHandle, *typeParser_);
+
+  auto* hiveHandle =
+      dynamic_cast<connector::hive::HiveInsertTableHandle*>(result.get());
+  ASSERT_NE(hiveHandle, nullptr);
+
+  const auto& storageParams = hiveHandle->storageParameters();
+  EXPECT_EQ(storageParams.size(), 2);
+  EXPECT_EQ(storageParams.at("param1"), "value1");
+  EXPECT_EQ(storageParams.at("param2"), "value2");
+}
+
+TEST_F(PrestoToVeloxConnectorTest, bigintOverflowLowAboveMax) {
+  auto lowBlock = serializeToBlock(
+      BaseVector::createConstant(
+          BIGINT(),
+          variant(std::numeric_limits<int64_t>::max()),
+          1,
+          pool_.get()),
+      pool_.get());
+  auto domain = createSingleRangeDomain(
+      "bigint",
+      lowBlock,
+      protocol::Bound::ABOVE,
+      nullptr,
+      protocol::Bound::BELOW,
+      false);
+
+  auto filter = toFilter(domain, *exprConverter_, *typeParser_);
+  EXPECT_EQ(filter->kind(), common::FilterKind::kAlwaysFalse);
+  EXPECT_FALSE(filter->testInt64(0));
+  EXPECT_FALSE(filter->testInt64(std::numeric_limits<int64_t>::max()));
+  EXPECT_FALSE(filter->testNull());
+}
+
+TEST_F(PrestoToVeloxConnectorTest, bigintOverflowHighBelowMin) {
+  auto highBlock = serializeToBlock(
+      BaseVector::createConstant(
+          BIGINT(),
+          variant(std::numeric_limits<int64_t>::min()),
+          1,
+          pool_.get()),
+      pool_.get());
+  auto domain = createSingleRangeDomain(
+      "bigint",
+      nullptr,
+      protocol::Bound::ABOVE,
+      highBlock,
+      protocol::Bound::BELOW,
+      false);
+
+  auto filter = toFilter(domain, *exprConverter_, *typeParser_);
+  EXPECT_EQ(filter->kind(), common::FilterKind::kAlwaysFalse);
+  EXPECT_FALSE(filter->testInt64(0));
+  EXPECT_FALSE(filter->testInt64(std::numeric_limits<int64_t>::min()));
+  EXPECT_FALSE(filter->testNull());
+}
+
+TEST_F(PrestoToVeloxConnectorTest, bigintOverflowWithNullAllowed) {
+  auto lowBlock = serializeToBlock(
+      BaseVector::createConstant(
+          BIGINT(),
+          variant(std::numeric_limits<int64_t>::max()),
+          1,
+          pool_.get()),
+      pool_.get());
+  auto domain = createSingleRangeDomain(
+      "bigint",
+      lowBlock,
+      protocol::Bound::ABOVE,
+      nullptr,
+      protocol::Bound::BELOW,
+      true);
+
+  auto filter = toFilter(domain, *exprConverter_, *typeParser_);
+  EXPECT_EQ(filter->kind(), common::FilterKind::kIsNull);
+  EXPECT_FALSE(filter->testInt64(0));
+  EXPECT_FALSE(filter->testInt64(std::numeric_limits<int64_t>::max()));
+  EXPECT_TRUE(filter->testNull());
+}
+
+TEST_F(PrestoToVeloxConnectorTest, dateOverflowLowAboveMax) {
+  auto lowBlock = serializeToBlock(
+      BaseVector::createConstant(
+          DATE(), variant(std::numeric_limits<int32_t>::max()), 1, pool_.get()),
+      pool_.get());
+  auto domain = createSingleRangeDomain(
+      "date",
+      lowBlock,
+      protocol::Bound::ABOVE,
+      nullptr,
+      protocol::Bound::BELOW,
+      false);
+
+  auto filter = toFilter(domain, *exprConverter_, *typeParser_);
+  EXPECT_EQ(filter->kind(), common::FilterKind::kAlwaysFalse);
+  EXPECT_FALSE(filter->testInt64(0));
+  EXPECT_FALSE(filter->testInt64(std::numeric_limits<int32_t>::max()));
+  EXPECT_FALSE(filter->testNull());
+}
+
+TEST_F(PrestoToVeloxConnectorTest, dateOverflowHighBelowMin) {
+  auto highBlock = serializeToBlock(
+      BaseVector::createConstant(
+          DATE(), variant(std::numeric_limits<int32_t>::min()), 1, pool_.get()),
+      pool_.get());
+  auto domain = createSingleRangeDomain(
+      "date",
+      nullptr,
+      protocol::Bound::ABOVE,
+      highBlock,
+      protocol::Bound::BELOW,
+      false);
+
+  auto filter = toFilter(domain, *exprConverter_, *typeParser_);
+  EXPECT_EQ(filter->kind(), common::FilterKind::kAlwaysFalse);
+  EXPECT_FALSE(filter->testInt64(0));
+  EXPECT_FALSE(filter->testInt64(std::numeric_limits<int32_t>::min()));
+  EXPECT_FALSE(filter->testNull());
 }

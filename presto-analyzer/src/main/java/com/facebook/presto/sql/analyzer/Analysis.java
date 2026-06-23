@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.sql.analyzer;
 
+import com.facebook.presto.common.ColumnLineageEntry;
 import com.facebook.presto.common.QualifiedObjectName;
 import com.facebook.presto.common.SourceColumn;
 import com.facebook.presto.common.Subfield;
@@ -22,6 +23,7 @@ import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ColumnMetadata;
 import com.facebook.presto.spi.ConnectorId;
 import com.facebook.presto.spi.MaterializedViewDefinition;
+import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.TableHandle;
 import com.facebook.presto.spi.analyzer.AccessControlInfo;
 import com.facebook.presto.spi.analyzer.AccessControlInfoForTable;
@@ -36,6 +38,7 @@ import com.facebook.presto.spi.function.FunctionKind;
 import com.facebook.presto.spi.function.table.Argument;
 import com.facebook.presto.spi.function.table.ConnectorTableFunctionHandle;
 import com.facebook.presto.spi.procedure.DistributedProcedure;
+import com.facebook.presto.spi.procedure.ProcedureAnalysisContext;
 import com.facebook.presto.spi.security.AccessControl;
 import com.facebook.presto.spi.security.AccessControlContext;
 import com.facebook.presto.spi.security.AllowAllAccessControl;
@@ -65,6 +68,7 @@ import com.facebook.presto.sql.tree.SubqueryExpression;
 import com.facebook.presto.sql.tree.Table;
 import com.facebook.presto.sql.tree.TableFunctionInvocation;
 import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.HashMultimap;
 import com.google.common.collect.HashMultiset;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -180,11 +184,11 @@ public class Analysis
     private final Map<NodeRef<Table>, Map<String, Expression>> columnMasks = new LinkedHashMap<>();
 
     // for call distributed procedure
-    private Optional<DistributedProcedure.DistributedProcedureType> distributedProcedureType = Optional.empty();
     private Optional<QualifiedObjectName> procedureName = Optional.empty();
-    private Optional<Object[]> procedureArguments = Optional.empty();
-    private Optional<TableHandle> callTarget = Optional.empty();
-    private Optional<QuerySpecification> targetQuery = Optional.empty();
+    private Optional<CallDistributedProcedureAnalysis> callDistributedProcedureAnalysis = Optional.empty();
+
+    // for create vector index
+    private Optional<CreateVectorIndexAnalysis> createVectorIndexAnalysis = Optional.empty();
 
     // for create table
     private Optional<QualifiedObjectName> createTableDestination = Optional.empty();
@@ -226,12 +230,21 @@ public class Analysis
     private Optional<Expression> viewAccessorWhereClause = Optional.empty();
 
     // Maps each output Field to its originating SourceColumn(s) for column-level lineage tracking.
-    private final Multimap<Field, SourceColumn> originColumnDetails = ArrayListMultimap.create();
+    private final Multimap<Field, SourceColumn> originColumnDetails = HashMultimap.create();
 
     // Maps each analyzed Expression to the Field(s) it produces, supporting expression-level lineage.
     private final Multimap<NodeRef<Expression>, Field> fieldLineage = ArrayListMultimap.create();
 
     private Optional<List<OutputColumnMetadata>> updatedSourceColumns = Optional.empty();
+
+    // Globally accumulating indirect source columns (WHERE, JOIN, GROUP BY, HAVING, ORDER BY, DISTINCT).
+    // These affect all output columns equally.
+    private final Set<ColumnLineageEntry> indirectSourceColumns = new LinkedHashSet<>();
+
+    // Per-field indirect source columns (CONDITIONAL, WINDOW).
+    // These only affect the specific output column whose expression contains the CASE/IF or window function.
+    // Propagated through CTEs, subqueries, views, and set operations alongside direct source columns.
+    private final Multimap<Field, ColumnLineageEntry> perFieldIndirectSources = HashMultimap.create();
 
     // names of tables and aliased relations. All names are resolved case-insensitive.
     private final Map<NodeRef<Relation>, QualifiedName> relationNames = new LinkedHashMap<>();
@@ -700,6 +713,26 @@ public class Analysis
         return createTableDestination;
     }
 
+    public void setCreateVectorIndexAnalysis(CreateVectorIndexAnalysis analysis)
+    {
+        this.createVectorIndexAnalysis = Optional.of(analysis);
+    }
+
+    public Optional<CreateVectorIndexAnalysis> getCreateVectorIndexAnalysis()
+    {
+        return createVectorIndexAnalysis;
+    }
+
+    public void setCallDistributedProcedureAnalysis(CallDistributedProcedureAnalysis analysis)
+    {
+        this.callDistributedProcedureAnalysis = Optional.of(analysis);
+    }
+
+    public Optional<CallDistributedProcedureAnalysis> getCallDistributedProcedureAnalysis()
+    {
+        return this.callDistributedProcedureAnalysis;
+    }
+
     public Optional<QualifiedObjectName> getProcedureName()
     {
         return procedureName;
@@ -708,36 +741,6 @@ public class Analysis
     public void setProcedureName(Optional<QualifiedObjectName> procedureName)
     {
         this.procedureName = procedureName;
-    }
-
-    public Optional<DistributedProcedure.DistributedProcedureType> getDistributedProcedureType()
-    {
-        return distributedProcedureType;
-    }
-
-    public void setDistributedProcedureType(Optional<DistributedProcedure.DistributedProcedureType> distributedProcedureType)
-    {
-        this.distributedProcedureType = distributedProcedureType;
-    }
-
-    public Optional<Object[]> getProcedureArguments()
-    {
-        return procedureArguments;
-    }
-
-    public void setProcedureArguments(Optional<Object[]> procedureArguments)
-    {
-        this.procedureArguments = procedureArguments;
-    }
-
-    public Optional<TableHandle> getCallTarget()
-    {
-        return callTarget;
-    }
-
-    public void setCallTarget(TableHandle callTarget)
-    {
-        this.callTarget = Optional.of(callTarget);
     }
 
     public Optional<TableHandle> getAnalyzeTarget()
@@ -1140,16 +1143,6 @@ public class Analysis
         return viewAccessorWhereClause;
     }
 
-    public void setTargetQuery(QuerySpecification targetQuery)
-    {
-        this.targetQuery = Optional.of(targetQuery);
-    }
-
-    public Optional<QuerySpecification> getTargetQuery()
-    {
-        return this.targetQuery;
-    }
-
     public Map<FunctionKind, Set<String>> getInvokedFunctions()
     {
         Map<FunctionKind, Set<String>> functionMap = new HashMap<>();
@@ -1201,9 +1194,25 @@ public class Analysis
         return ImmutableSet.copyOf(originColumnDetails.get(field));
     }
 
+    /**
+     * Propagates all lineage (direct source columns + per-field indirect) from sourceField to newField.
+     * Use this whenever creating a new Field that represents the same column through an alias, CTE,
+     * view, or set operation to avoid missing propagation.
+     */
+    public void propagateLineage(Field newField, Field sourceField)
+    {
+        addSourceColumns(newField, getSourceColumns(sourceField));
+        addPerFieldIndirectSources(newField, getPerFieldIndirectSources(sourceField));
+    }
+
     public void addExpressionFields(Expression expression, Collection<Field> fields)
     {
         fieldLineage.putAll(NodeRef.of(expression), fields);
+    }
+
+    public Collection<Field> getExpressionFields(Expression expression)
+    {
+        return fieldLineage.get(NodeRef.of(expression));
     }
 
     public Set<SourceColumn> getExpressionSourceColumns(Expression expression)
@@ -1221,6 +1230,37 @@ public class Analysis
     public Optional<List<OutputColumnMetadata>> getUpdatedSourceColumns()
     {
         return updatedSourceColumns;
+    }
+
+    public void addIndirectSourceColumns(Set<ColumnLineageEntry> entries)
+    {
+        indirectSourceColumns.addAll(entries);
+    }
+
+    public Set<ColumnLineageEntry> getIndirectSourceColumns()
+    {
+        return ImmutableSet.copyOf(indirectSourceColumns);
+    }
+
+    public void addPerFieldIndirectSources(Field field, Set<ColumnLineageEntry> entries)
+    {
+        perFieldIndirectSources.putAll(field, entries);
+    }
+
+    public Set<ColumnLineageEntry> getPerFieldIndirectSources(Field field)
+    {
+        return ImmutableSet.copyOf(perFieldIndirectSources.get(field));
+    }
+
+    /**
+     * Returns the full indirect sources for a field: query-level + per-field.
+     */
+    public Set<ColumnLineageEntry> getAllIndirectSourcesForField(Field field)
+    {
+        ImmutableSet.Builder<ColumnLineageEntry> builder = ImmutableSet.builder();
+        builder.addAll(indirectSourceColumns);
+        builder.addAll(perFieldIndirectSources.get(field));
+        return builder.build();
     }
 
     public void registerTableForColumnMasking(QualifiedObjectName table, String column, String identity)
@@ -1315,12 +1355,14 @@ public class Analysis
         private final TableHandle target;
         private final List<ColumnHandle> columns;
         private final Query query;
+        private final SchemaTableName materializedViewName;
 
-        public RefreshMaterializedViewAnalysis(TableHandle target, List<ColumnHandle> columns, Query query)
+        public RefreshMaterializedViewAnalysis(TableHandle target, List<ColumnHandle> columns, Query query, SchemaTableName materializedViewName)
         {
             this.target = requireNonNull(target, "target is null");
             this.columns = requireNonNull(columns, "columns is null");
             this.query = requireNonNull(query, "query is null");
+            this.materializedViewName = requireNonNull(materializedViewName, "materializedViewName is null");
             checkArgument(columns.size() > 0, "No columns given to insert");
         }
 
@@ -1337,6 +1379,11 @@ public class Analysis
         public Query getQuery()
         {
             return query;
+        }
+
+        public SchemaTableName getMaterializedViewName()
+        {
+            return materializedViewName;
         }
     }
 
@@ -1935,6 +1982,88 @@ public class Analysis
         public Scope getTargetTableScope()
         {
             return targetTableScope;
+        }
+    }
+
+    @Immutable
+    public static final class CallDistributedProcedureAnalysis
+    {
+        private final DistributedProcedure.DistributedProcedureType distributedProcedureType;
+        private final Object[] procedureArguments;
+        private final Optional<ProcedureAnalysisContext> procedureAnalysisContext;
+
+        public CallDistributedProcedureAnalysis(
+                DistributedProcedure.DistributedProcedureType distributedProcedureType,
+                Object[] procedureArguments,
+                Optional<ProcedureAnalysisContext> procedureAnalysisContext)
+        {
+            this.distributedProcedureType = requireNonNull(distributedProcedureType, "distributedProcedureType is null");
+            this.procedureArguments = requireNonNull(procedureArguments, "procedureArguments is null");
+            this.procedureAnalysisContext = requireNonNull(procedureAnalysisContext, "procedureAnalysisContext is null");
+        }
+
+        public DistributedProcedure.DistributedProcedureType getDistributedProcedureType()
+        {
+            return distributedProcedureType;
+        }
+
+        public Object[] getProcedureArguments()
+        {
+            return procedureArguments;
+        }
+
+        public Optional<ProcedureAnalysisContext> getProcedureAnalysisContext()
+        {
+            return procedureAnalysisContext;
+        }
+    }
+
+    @Immutable
+    public static final class CreateVectorIndexAnalysis
+    {
+        private final QualifiedObjectName sourceTableName;
+        private final QualifiedObjectName indexName;
+        private final List<Identifier> columns;
+        private final Map<String, Expression> properties;
+        private final Optional<Expression> updatingFor;
+
+        public CreateVectorIndexAnalysis(
+                QualifiedObjectName sourceTableName,
+                QualifiedObjectName indexName,
+                List<Identifier> columns,
+                Map<String, Expression> properties,
+                Optional<Expression> updatingFor)
+        {
+            this.sourceTableName = requireNonNull(sourceTableName, "sourceTableName is null");
+            this.indexName = requireNonNull(indexName, "indexName is null");
+            this.columns = ImmutableList.copyOf(requireNonNull(columns, "columns is null"));
+            this.properties = ImmutableMap.copyOf(requireNonNull(properties, "properties is null"));
+            this.updatingFor = requireNonNull(updatingFor, "updatingFor is null");
+        }
+
+        public QualifiedObjectName getSourceTableName()
+        {
+            return sourceTableName;
+        }
+
+        public QualifiedObjectName getIndexName()
+        {
+            return indexName;
+        }
+
+        public List<Identifier> getColumns()
+        {
+            return columns;
+        }
+
+        public Map<String, Expression> getProperties()
+        {
+            return properties;
+        }
+
+        public Optional<Expression> getUpdatingFor()
+        {
+            return updatingFor;
         }
     }
 }

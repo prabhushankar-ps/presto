@@ -781,6 +781,10 @@ void to_json(json& j, const std::shared_ptr<PlanNode>& p) {
     j = *std::static_pointer_cast<CallDistributedProcedureNode>(p);
     return;
   }
+  if (type == "com.facebook.presto.sql.planner.plan.RPCNode") {
+    j = *std::static_pointer_cast<RPCNode>(p);
+    return;
+  }
 
   throw TypeError(type + " no abstract type PlanNode ");
 }
@@ -985,6 +989,12 @@ void from_json(const json& j, std::shared_ptr<PlanNode>& p) {
     p = std::static_pointer_cast<PlanNode>(k);
     return;
   }
+  if (type == "com.facebook.presto.sql.planner.plan.RPCNode") {
+    std::shared_ptr<RPCNode> k = std::make_shared<RPCNode>();
+    j.get_to(*k);
+    p = std::static_pointer_cast<PlanNode>(k);
+    return;
+  }
 
   throw TypeError(type + " no abstract type PlanNode ");
 }
@@ -1043,6 +1053,13 @@ void to_json(json& j, const AggregationNode& p) {
       "AggregationNode",
       "Integer",
       "aggregationId");
+  to_json_key(
+      j,
+      "aggregationOutputs",
+      p.aggregationOutputs,
+      "AggregationNode",
+      "List<VariableReferenceExpression>",
+      "aggregationOutputs");
 }
 
 void from_json(const json& j, AggregationNode& p) {
@@ -1093,6 +1110,13 @@ void from_json(const json& j, AggregationNode& p) {
       "AggregationNode",
       "Integer",
       "aggregationId");
+  from_json_key(
+      j,
+      "aggregationOutputs",
+      p.aggregationOutputs,
+      "AggregationNode",
+      "List<VariableReferenceExpression>",
+      "aggregationOutputs");
 }
 } // namespace facebook::presto::protocol
 namespace facebook::presto::protocol {
@@ -1130,6 +1154,18 @@ void from_json(const json& j, std::shared_ptr<ConnectorTableHandle>& p) {
     throw ParseError(
         std::string(e.what()) + " ConnectorTableHandle  ConnectorTableHandle");
   }
+
+  if (j.contains("customSerializedValue")) {
+    VELOX_CHECK(
+        !type.empty() && type[0] != '$',
+        "Internal handle type '{}' should not have customSerializedValue",
+        type);
+    std::string binaryData = velox::encoding::Base64::decode(
+        j["customSerializedValue"].get<std::string>());
+    getConnectorProtocol(type).deserialize(binaryData, p);
+    return;
+  }
+
   getConnectorProtocol(type).from_json(j, p);
 }
 } // namespace facebook::presto::protocol
@@ -1159,6 +1195,17 @@ void from_json(const json& j, std::shared_ptr<ConnectorTransactionHandle>& p) {
     throw ParseError(
         std::string(e.what()) +
         " ConnectorTransactionHandle  ConnectorTransactionHandle");
+  }
+
+  if (j.contains("customSerializedValue")) {
+    VELOX_CHECK(
+        !type.empty() && type[0] != '$',
+        "Internal handle type '{}' should not have customSerializedValue",
+        type);
+    std::string binaryData = velox::encoding::Base64::decode(
+        j["customSerializedValue"].get<std::string>());
+    getConnectorProtocol(type).deserialize(binaryData, p);
+    return;
   }
 
   if (type == "$remote") {
@@ -2144,6 +2191,20 @@ void to_json(json& j, const SessionRepresentation& p) {
       "SessionRepresentation",
       "Map<SqlFunctionId, SqlInvokedFunction>",
       "sessionFunctions");
+  to_json_key(
+      j,
+      "selectedUser",
+      p.selectedUser,
+      "SessionRepresentation",
+      "String",
+      "selectedUser");
+  to_json_key(
+      j,
+      "reasonForSelect",
+      p.reasonForSelect,
+      "SessionRepresentation",
+      "String",
+      "reasonForSelect");
 }
 
 void from_json(const json& j, SessionRepresentation& p) {
@@ -2277,6 +2338,20 @@ void from_json(const json& j, SessionRepresentation& p) {
       "SessionRepresentation",
       "Map<SqlFunctionId, SqlInvokedFunction>",
       "sessionFunctions");
+  from_json_key(
+      j,
+      "selectedUser",
+      p.selectedUser,
+      "SessionRepresentation",
+      "String",
+      "selectedUser");
+  from_json_key(
+      j,
+      "reasonForSelect",
+      p.reasonForSelect,
+      "SessionRepresentation",
+      "String",
+      "reasonForSelect");
 }
 } // namespace facebook::presto::protocol
 namespace facebook::presto::protocol {
@@ -2462,6 +2537,17 @@ void from_json(const json& j, std::shared_ptr<ConnectorSplit>& p) {
     type = p->getSubclassKey(j);
   } catch (json::parse_error& e) {
     throw ParseError(std::string(e.what()) + " ConnectorSplit");
+  }
+
+  if (j.contains("customSerializedValue")) {
+    VELOX_CHECK(
+        !type.empty() && type[0] != '$',
+        "Internal handle type '{}' should not have customSerializedValue",
+        type);
+    std::string binaryData = velox::encoding::Base64::decode(
+        j["customSerializedValue"].get<std::string>());
+    getConnectorProtocol(type).deserialize(binaryData, p);
+    return;
   }
 
   if (type == "$remote") {
@@ -3052,6 +3138,17 @@ void from_json(const json& j, std::shared_ptr<ConnectorPartitioningHandle>& p) {
     throw ParseError(std::string(e.what()) + " ConnectorPartitioningHandle");
   }
 
+  if (j.contains("customSerializedValue")) {
+    VELOX_CHECK(
+        !type.empty() && type[0] != '$',
+        "Internal handle type '{}' should not have customSerializedValue",
+        type);
+    std::string binaryData = velox::encoding::Base64::decode(
+        j["customSerializedValue"].get<std::string>());
+    getConnectorProtocol(type).deserialize(binaryData, p);
+    return;
+  }
+
   if (type == "$remote") {
     auto k = std::make_shared<SystemPartitioningHandle>();
     j.get_to(*k);
@@ -3448,6 +3545,18 @@ void from_json(const json& j, std::shared_ptr<ConnectorOutputTableHandle>& p) {
         std::string(e.what()) +
         " ConnectorOutputTableHandle  ConnectorOutputTableHandle");
   }
+
+  if (j.contains("customSerializedValue")) {
+    VELOX_CHECK(
+        !type.empty() && type[0] != '$',
+        "Internal handle type '{}' should not have customSerializedValue",
+        type);
+    std::string binaryData = velox::encoding::Base64::decode(
+        j["customSerializedValue"].get<std::string>());
+    getConnectorProtocol(type).deserialize(binaryData, p);
+    return;
+  }
+
   getConnectorProtocol(type).from_json(j, p);
 }
 } // namespace facebook::presto::protocol
@@ -3602,6 +3711,18 @@ void from_json(const json& j, std::shared_ptr<ConnectorDeleteTableHandle>& p) {
         std::string(e.what()) +
         " ConnectorDeleteTableHandle  ConnectorDeleteTableHandle");
   }
+
+  if (j.contains("customSerializedValue")) {
+    VELOX_CHECK(
+        !type.empty() && type[0] != '$',
+        "Internal handle type '{}' should not have customSerializedValue",
+        type);
+    std::string binaryData = velox::encoding::Base64::decode(
+        j["customSerializedValue"].get<std::string>());
+    getConnectorProtocol(type).deserialize(binaryData, p);
+    return;
+  }
+
   getConnectorProtocol(type).from_json(j, p);
 }
 } // namespace facebook::presto::protocol
@@ -3871,6 +3992,18 @@ void from_json(
         std::string(e.what()) +
         " ConnectorDistributedProcedureHandle  ConnectorDistributedProcedureHandle");
   }
+
+  if (j.contains("customSerializedValue")) {
+    VELOX_CHECK(
+        !type.empty() && type[0] != '$',
+        "Internal handle type '{}' should not have customSerializedValue",
+        type);
+    std::string binaryData = velox::encoding::Base64::decode(
+        j["customSerializedValue"].get<std::string>());
+    getConnectorProtocol(type).deserialize(binaryData, p);
+    return;
+  }
+
   getConnectorProtocol(type).from_json(j, p);
 }
 } // namespace facebook::presto::protocol
@@ -5626,6 +5759,43 @@ void from_json(const json& j, ExecutionFailureInfo& p) {
 }
 } // namespace facebook::presto::protocol
 namespace facebook::presto::protocol {
+
+void to_json(json& j, const ExpressionOptimizationRequest& p) {
+  j = json::object();
+  to_json_key(
+      j,
+      "expressions",
+      p.expressions,
+      "ExpressionOptimizationRequest",
+      "List<std::shared_ptr<RowExpression>>",
+      "expressions");
+  to_json_key(
+      j,
+      "sessionProperties",
+      p.sessionProperties,
+      "ExpressionOptimizationRequest",
+      "Map<String, String>",
+      "sessionProperties");
+}
+
+void from_json(const json& j, ExpressionOptimizationRequest& p) {
+  from_json_key(
+      j,
+      "expressions",
+      p.expressions,
+      "ExpressionOptimizationRequest",
+      "List<std::shared_ptr<RowExpression>>",
+      "expressions");
+  from_json_key(
+      j,
+      "sessionProperties",
+      p.sessionProperties,
+      "ExpressionOptimizationRequest",
+      "Map<String, String>",
+      "sessionProperties");
+}
+} // namespace facebook::presto::protocol
+namespace facebook::presto::protocol {
 FilterNode::FilterNode() noexcept {
   _type = ".FilterNode";
 }
@@ -5941,6 +6111,18 @@ void from_json(const json& j, std::shared_ptr<ConnectorIndexHandle>& p) {
     throw ParseError(
         std::string(e.what()) + " ConnectorIndexHandle ConnectorIndexHandle");
   }
+
+  if (j.contains("customSerializedValue")) {
+    VELOX_CHECK(
+        !type.empty() && type[0] != '$',
+        "Internal handle type '{}' should not have customSerializedValue",
+        type);
+    std::string binaryData = velox::encoding::Base64::decode(
+        j["customSerializedValue"].get<std::string>());
+    getConnectorProtocol(type).deserialize(binaryData, p);
+    return;
+  }
+
   getConnectorProtocol(type).from_json(j, p);
 }
 } // namespace facebook::presto::protocol
@@ -6163,6 +6345,17 @@ void from_json(const json& j, std::shared_ptr<ColumnHandle>& p) {
   } catch (json::parse_error& e) {
     throw ParseError(std::string(e.what()) + " ColumnHandle  ColumnHandle");
   }
+
+  if (j.contains("customSerializedValue")) {
+    VELOX_CHECK(
+        !type.empty() && type[0] != '$',
+        "Internal handle type '{}' should not have customSerializedValue",
+        type);
+    std::string binaryData = velox::encoding::Base64::decode(
+        j["customSerializedValue"].get<std::string>());
+    getConnectorProtocol(type).deserialize(binaryData, p);
+    return;
+  }
   getConnectorProtocol(type).from_json(j, p);
 }
 } // namespace facebook::presto::protocol
@@ -6184,6 +6377,18 @@ void from_json(const json& j, std::shared_ptr<ConnectorTableLayoutHandle>& p) {
         std::string(e.what()) +
         " ConnectorTableLayoutHandle  ConnectorTableLayoutHandle");
   }
+
+  if (j.contains("customSerializedValue")) {
+    VELOX_CHECK(
+        !type.empty() && type[0] != '$',
+        "Internal handle type '{}' should not have customSerializedValue",
+        type);
+    std::string binaryData = velox::encoding::Base64::decode(
+        j["customSerializedValue"].get<std::string>());
+    getConnectorProtocol(type).deserialize(binaryData, p);
+    return;
+  }
+
   getConnectorProtocol(type).from_json(j, p);
 }
 } // namespace facebook::presto::protocol
@@ -6370,6 +6575,18 @@ void from_json(const json& j, std::shared_ptr<ConnectorInsertTableHandle>& p) {
         std::string(e.what()) +
         " ConnectorInsertTableHandle  ConnectorInsertTableHandle");
   }
+
+  if (j.contains("customSerializedValue")) {
+    VELOX_CHECK(
+        !type.empty() && type[0] != '$',
+        "Internal handle type '{}' should not have customSerializedValue",
+        type);
+    std::string binaryData = velox::encoding::Base64::decode(
+        j["customSerializedValue"].get<std::string>());
+    getConnectorProtocol(type).deserialize(binaryData, p);
+    return;
+  }
+
   getConnectorProtocol(type).from_json(j, p);
 }
 } // namespace facebook::presto::protocol
@@ -6776,6 +6993,13 @@ void to_json(json& j, const JsonBasedUdfFunctionMetadata& p) {
       "JsonBasedUdfFunctionMetadata",
       "URI",
       "executionEndpoint");
+  to_json_key(
+      j,
+      "isRpcFunction",
+      p.isRpcFunction,
+      "JsonBasedUdfFunctionMetadata",
+      "bool",
+      "isRpcFunction");
 }
 
 void from_json(const json& j, JsonBasedUdfFunctionMetadata& p) {
@@ -6870,6 +7094,13 @@ void from_json(const json& j, JsonBasedUdfFunctionMetadata& p) {
       "JsonBasedUdfFunctionMetadata",
       "URI",
       "executionEndpoint");
+  from_json_key(
+      j,
+      "isRpcFunction",
+      p.isRpcFunction,
+      "JsonBasedUdfFunctionMetadata",
+      "bool",
+      "isRpcFunction");
 }
 } // namespace facebook::presto::protocol
 // dependency KeyedSubclass
@@ -8814,6 +9045,20 @@ void to_json(json& j, const StageExecutionDescriptor& p) {
       "StageExecutionDescriptor",
       "int",
       "totalLifespans");
+  to_json_key(
+      j,
+      "groupedExecutionPartitionValues",
+      p.groupedExecutionPartitionValues,
+      "StageExecutionDescriptor",
+      "List<Map<String, String>>",
+      "groupedExecutionPartitionValues");
+  to_json_key(
+      j,
+      "partitionColumnMappings",
+      p.partitionColumnMappings,
+      "StageExecutionDescriptor",
+      "Map<PlanNodeId, Map<String, String>>",
+      "partitionColumnMappings");
 }
 
 void from_json(const json& j, StageExecutionDescriptor& p) {
@@ -8838,6 +9083,20 @@ void from_json(const json& j, StageExecutionDescriptor& p) {
       "StageExecutionDescriptor",
       "int",
       "totalLifespans");
+  from_json_key(
+      j,
+      "groupedExecutionPartitionValues",
+      p.groupedExecutionPartitionValues,
+      "StageExecutionDescriptor",
+      "List<Map<String, String>>",
+      "groupedExecutionPartitionValues");
+  from_json_key(
+      j,
+      "partitionColumnMappings",
+      p.partitionColumnMappings,
+      "StageExecutionDescriptor",
+      "Map<PlanNodeId, Map<String, String>>",
+      "partitionColumnMappings");
 }
 } // namespace facebook::presto::protocol
 namespace facebook::presto::protocol {
@@ -9115,6 +9374,43 @@ void from_json(const json& j, StatsAndCosts& p) {
 }
 } // namespace facebook::presto::protocol
 namespace facebook::presto::protocol {
+// Loosely copied this here from NLOHMANN_JSON_SERIALIZE_ENUM()
+
+// NOLINTNEXTLINE: cppcoreguidelines-avoid-c-arrays
+static const std::pair<TransportType, json> TransportType_enum_table[] =
+    { // NOLINT: cert-err58-cpp
+        {TransportType::HTTP, "HTTP"},
+        {TransportType::ANY, "ANY"}};
+void to_json(json& j, const TransportType& e) {
+  static_assert(
+      std::is_enum<TransportType>::value, "TransportType must be an enum!");
+  const auto* it = std::find_if(
+      std::begin(TransportType_enum_table),
+      std::end(TransportType_enum_table),
+      [e](const std::pair<TransportType, json>& ej_pair) -> bool {
+        return ej_pair.first == e;
+      });
+  j = ((it != std::end(TransportType_enum_table))
+           ? it
+           : std::begin(TransportType_enum_table))
+          ->second;
+}
+void from_json(const json& j, TransportType& e) {
+  static_assert(
+      std::is_enum<TransportType>::value, "TransportType must be an enum!");
+  const auto* it = std::find_if(
+      std::begin(TransportType_enum_table),
+      std::end(TransportType_enum_table),
+      [&j](const std::pair<TransportType, json>& ej_pair) -> bool {
+        return ej_pair.second == j;
+      });
+  e = ((it != std::end(TransportType_enum_table))
+           ? it
+           : std::begin(TransportType_enum_table))
+          ->first;
+}
+} // namespace facebook::presto::protocol
+namespace facebook::presto::protocol {
 
 void to_json(json& j, const PlanFragment& p) {
   j = json::object();
@@ -9169,6 +9465,13 @@ void to_json(json& j, const PlanFragment& p) {
       "PlanFragment",
       "bool",
       "outputTableWriterFragment");
+  to_json_key(
+      j,
+      "outputTransportType",
+      p.outputTransportType,
+      "PlanFragment",
+      "TransportType",
+      "outputTransportType");
   to_json_key(
       j,
       "jsonRepresentation",
@@ -9230,6 +9533,13 @@ void from_json(const json& j, PlanFragment& p) {
       "PlanFragment",
       "bool",
       "outputTableWriterFragment");
+  from_json_key(
+      j,
+      "outputTransportType",
+      p.outputTransportType,
+      "PlanFragment",
+      "TransportType",
+      "outputTransportType");
   from_json_key(
       j,
       "jsonRepresentation",
@@ -9306,6 +9616,138 @@ void from_json(const json& j, ProjectNode& p) {
       "assignments");
   from_json_key(
       j, "locality", p.locality, "ProjectNode", "Locality", "locality");
+}
+} // namespace facebook::presto::protocol
+namespace facebook::presto::protocol {
+// Loosely copied this here from NLOHMANN_JSON_SERIALIZE_ENUM()
+
+// NOLINTNEXTLINE: cppcoreguidelines-avoid-c-arrays
+static const std::pair<RPCNodeStreamingMode, json>
+    RPCNodeStreamingMode_enum_table[] =
+        { // NOLINT: cert-err58-cpp
+            {RPCNodeStreamingMode::PER_ROW, "PER_ROW"},
+            {RPCNodeStreamingMode::BATCH, "BATCH"}};
+void to_json(json& j, const RPCNodeStreamingMode& e) {
+  static_assert(
+      std::is_enum<RPCNodeStreamingMode>::value,
+      "RPCNodeStreamingMode must be an enum!");
+  const auto* it = std::find_if(
+      std::begin(RPCNodeStreamingMode_enum_table),
+      std::end(RPCNodeStreamingMode_enum_table),
+      [e](const std::pair<RPCNodeStreamingMode, json>& ej_pair) -> bool {
+        return ej_pair.first == e;
+      });
+  j = ((it != std::end(RPCNodeStreamingMode_enum_table))
+           ? it
+           : std::begin(RPCNodeStreamingMode_enum_table))
+          ->second;
+}
+void from_json(const json& j, RPCNodeStreamingMode& e) {
+  static_assert(
+      std::is_enum<RPCNodeStreamingMode>::value,
+      "RPCNodeStreamingMode must be an enum!");
+  const auto* it = std::find_if(
+      std::begin(RPCNodeStreamingMode_enum_table),
+      std::end(RPCNodeStreamingMode_enum_table),
+      [&j](const std::pair<RPCNodeStreamingMode, json>& ej_pair) -> bool {
+        return ej_pair.second == j;
+      });
+  e = ((it != std::end(RPCNodeStreamingMode_enum_table))
+           ? it
+           : std::begin(RPCNodeStreamingMode_enum_table))
+          ->first;
+}
+} // namespace facebook::presto::protocol
+namespace facebook::presto::protocol {
+RPCNode::RPCNode() noexcept {
+  _type = "com.facebook.presto.sql.planner.plan.RPCNode";
+}
+
+void to_json(json& j, const RPCNode& p) {
+  j = json::object();
+  j["@type"] = "com.facebook.presto.sql.planner.plan.RPCNode";
+  to_json_key(j, "id", p.id, "RPCNode", "PlanNodeId", "id");
+  to_json_key(j, "source", p.source, "RPCNode", "PlanNode", "source");
+  to_json_key(
+      j, "functionName", p.functionName, "RPCNode", "String", "functionName");
+  to_json_key(
+      j,
+      "arguments",
+      p.arguments,
+      "RPCNode",
+      "List<std::shared_ptr<RowExpression>>",
+      "arguments");
+  to_json_key(
+      j,
+      "argumentColumns",
+      p.argumentColumns,
+      "RPCNode",
+      "List<String>",
+      "argumentColumns");
+  to_json_key(
+      j,
+      "outputVariable",
+      p.outputVariable,
+      "RPCNode",
+      "VariableReferenceExpression",
+      "outputVariable");
+  to_json_key(
+      j,
+      "streamingMode",
+      p.streamingMode,
+      "RPCNode",
+      "RPCNodeStreamingMode",
+      "streamingMode");
+  to_json_key(
+      j,
+      "dispatchBatchSize",
+      p.dispatchBatchSize,
+      "RPCNode",
+      "Integer",
+      "dispatchBatchSize");
+}
+
+void from_json(const json& j, RPCNode& p) {
+  p._type = j["@type"];
+  from_json_key(j, "id", p.id, "RPCNode", "PlanNodeId", "id");
+  from_json_key(j, "source", p.source, "RPCNode", "PlanNode", "source");
+  from_json_key(
+      j, "functionName", p.functionName, "RPCNode", "String", "functionName");
+  from_json_key(
+      j,
+      "arguments",
+      p.arguments,
+      "RPCNode",
+      "List<std::shared_ptr<RowExpression>>",
+      "arguments");
+  from_json_key(
+      j,
+      "argumentColumns",
+      p.argumentColumns,
+      "RPCNode",
+      "List<String>",
+      "argumentColumns");
+  from_json_key(
+      j,
+      "outputVariable",
+      p.outputVariable,
+      "RPCNode",
+      "VariableReferenceExpression",
+      "outputVariable");
+  from_json_key(
+      j,
+      "streamingMode",
+      p.streamingMode,
+      "RPCNode",
+      "RPCNodeStreamingMode",
+      "streamingMode");
+  from_json_key(
+      j,
+      "dispatchBatchSize",
+      p.dispatchBatchSize,
+      "RPCNode",
+      "Integer",
+      "dispatchBatchSize");
 }
 } // namespace facebook::presto::protocol
 namespace facebook::presto::protocol {
@@ -9409,6 +9851,13 @@ void to_json(json& j, const RemoteSourceNode& p) {
       "RemoteSourceNode",
       "ExchangeEncoding",
       "encoding");
+  to_json_key(
+      j,
+      "transportType",
+      p.transportType,
+      "RemoteSourceNode",
+      "std::shared_ptr<TransportType>",
+      "transportType");
 }
 
 void from_json(const json& j, RemoteSourceNode& p) {
@@ -9456,6 +9905,13 @@ void from_json(const json& j, RemoteSourceNode& p) {
       "RemoteSourceNode",
       "ExchangeEncoding",
       "encoding");
+  from_json_key(
+      j,
+      "transportType",
+      p.transportType,
+      "RemoteSourceNode",
+      "std::shared_ptr<TransportType>",
+      "transportType");
 }
 } // namespace facebook::presto::protocol
 namespace facebook::presto::protocol {

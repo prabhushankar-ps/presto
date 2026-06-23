@@ -8,9 +8,25 @@ import tsparser from "@typescript-eslint/parser";
 
 export default [
     js.configs.recommended,
-    reactHooks.configs["recommended-latest"],
     {
-        ignores: ["**/vendor/**", "**/node_modules/**", "**/sql-parser/**", "webpack.config.js"],
+        files: ["**/*.{js,jsx,ts,tsx}"],
+        plugins: {
+            "react-hooks": reactHooks,
+        },
+        rules: {
+            "react-hooks/rules-of-hooks": "error",
+            "react-hooks/exhaustive-deps": "warn",
+        },
+    },
+    {
+        ignores: [
+            "**/vendor/**",
+            "**/node_modules/**",
+            "**/sql-parser/**",
+            "webpack.config.js",
+            "jest.config.js",
+            "coverage/**",
+        ],
     },
     {
         languageOptions: {
@@ -84,6 +100,20 @@ export default [
             react: {
                 version: "detect",
             },
+        },
+    },
+    // Test files
+    {
+        files: ["**/*.test.{js,jsx,ts,tsx}", "**/*.spec.{js,jsx,ts,tsx}", "**/setupTests.ts", "**/__tests__/**"],
+        languageOptions: {
+            globals: {
+                ...globals.jest,
+            },
+        },
+        rules: {
+            "@typescript-eslint/no-explicit-any": "off",
+            "react/display-name": "off",
+            "no-undef": "off", // Jest globals are defined
         },
     },
     prettierEslint,

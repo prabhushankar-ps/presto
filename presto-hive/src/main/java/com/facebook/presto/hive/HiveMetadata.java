@@ -1102,7 +1102,10 @@ public class HiveMetadata
                 throw new PrestoException(NOT_SUPPORTED, "Cannot create non-managed Hive table");
             }
             String externalLocation = getExternalLocation(tableMetadata.getProperties());
-            targetPath = getExternalPath(new HdfsContext(session, schemaName, tableName, externalLocation, true), externalLocation);
+            targetPath = MetastoreUtil.getExternalPath(
+                    hdfsEnvironment,
+                    new HdfsContext(session, schemaName, tableName, externalLocation, true),
+                    externalLocation);
         }
         else if (tableType.equals(MANAGED_TABLE) || tableType.equals(MATERIALIZED_VIEW)) {
             LocationHandle locationHandle = locationService.forNewTable(metastore, session, schemaName, tableName, isTempPathRequired(session, bucketProperty, preferredOrderingColumns));
@@ -1450,20 +1453,6 @@ public class HiveMetadata
         }
     }
 
-    private Path getExternalPath(HdfsContext context, String location)
-    {
-        try {
-            Path path = new Path(location);
-            if (!hdfsEnvironment.getFileSystem(context, path).isDirectory(path)) {
-                throw new PrestoException(INVALID_TABLE_PROPERTY, "External location must be a directory");
-            }
-            return path;
-        }
-        catch (IllegalArgumentException | IOException e) {
-            throw new PrestoException(INVALID_TABLE_PROPERTY, "External location is not a valid file system URI", e);
-        }
-    }
-
     private void checkPartitionTypesSupported(List<Column> partitionColumns)
     {
         for (Column partitionColumn : partitionColumns) {
@@ -1739,6 +1728,7 @@ public class HiveMetadata
     public HiveOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, Optional<ConnectorNewTableLayout> layout)
     {
         verifyJvmTimeZone();
+        metastore.setQueryRuntimeStats(session.getRuntimeStats());
 
         if (getExternalLocation(tableMetadata.getProperties()) != null) {
             throw new PrestoException(NOT_SUPPORTED, "External tables cannot be created using CREATE TABLE AS");
@@ -2058,20 +2048,30 @@ public class HiveMetadata
             int bucketCount,
             Set<String> existingFileNames)
     {
-        if (existingFileNames.size() == bucketCount) {
-            // fast path for common case
+        // Extract unique bucket numbers from existing file names
+        Set<Integer> existingBuckets = existingFileNames.stream()
+                .map(HiveWriterFactory::getBucketNumber)
+                .filter(OptionalInt::isPresent)
+                .map(OptionalInt::getAsInt)
+                .collect(toImmutableSet());
+
+        if (existingBuckets.size() == bucketCount) {
+            // fast path for common case - all buckets have files
             return ImmutableList.of();
         }
+
         String fileExtension = getFileExtension(fromHiveStorageFormat(storageFormat), compressionCodec);
         ImmutableList.Builder<String> missingFileNamesBuilder = ImmutableList.builder();
         for (int i = 0; i < bucketCount; i++) {
-            String targetFileName = isFileRenamingEnabled(session) ? String.valueOf(i) : computeBucketedFileName(session.getQueryId(), i) + fileExtension;
-            if (!existingFileNames.contains(targetFileName)) {
+            if (!existingBuckets.contains(i)) {
+                String targetFileName = isFileRenamingEnabled(session) ? String.valueOf(i) : computeBucketedFileName(session.getQueryId(), i) + fileExtension;
                 missingFileNamesBuilder.add(targetFileName);
             }
         }
         List<String> missingFileNames = missingFileNamesBuilder.build();
-        verify(existingFileNames.size() + missingFileNames.size() == bucketCount);
+        verify(existingBuckets.size() + missingFileNames.size() == bucketCount,
+                "Expected %s buckets, but found %s existing and %s missing",
+                bucketCount, existingBuckets.size(), missingFileNames.size());
         return missingFileNames;
     }
 
@@ -2084,6 +2084,7 @@ public class HiveMetadata
     private HiveInsertTableHandle beginInsertInternal(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         verifyJvmTimeZone();
+        metastore.setQueryRuntimeStats(session.getRuntimeStats());
 
         MetastoreContext metastoreContext = getMetastoreContext(session);
 
@@ -2570,9 +2571,11 @@ public class HiveMetadata
                         .orElseThrow(() -> new TableNotFoundException(baseTableName)))
                 .collect(toImmutableList());
 
-        baseTables.forEach(table -> checkState(
-                table.getTableType().equals(MANAGED_TABLE),
-                format("base table %s is not a managed table", table.getTableName())));
+        baseTables.forEach(table -> {
+            if (!table.getTableType().equals(MANAGED_TABLE)) {
+                throw new PrestoException(NOT_SUPPORTED, format("base table %s is not a managed table", table.getTableName()));
+            }
+        });
 
         Table materializedViewTable = metastore.getTable(metastoreContext, materializedViewName.getSchemaName(), materializedViewName.getTableName())
                 .orElseThrow(() -> new MaterializedViewNotFoundException(materializedViewName));

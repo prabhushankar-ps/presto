@@ -22,6 +22,7 @@ import java.util.Map;
 import static com.facebook.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static com.facebook.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static com.facebook.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static com.facebook.airlift.units.DataSize.Unit.GIGABYTE;
 import static com.facebook.airlift.units.DataSize.Unit.MEGABYTE;
 import static com.facebook.airlift.units.DataSize.succinctDataSize;
 import static com.facebook.presto.hive.HiveCompressionCodec.NONE;
@@ -74,7 +75,12 @@ public class TestIcebergConfig
                 .setManifestCacheMaxChunkSize(succinctDataSize(2, MEGABYTE))
                 .setMaxStatisticsFileCacheSize(succinctDataSize(256, MEGABYTE))
                 .setStatisticsKllSketchKParameter(1024)
-                .setMaterializedViewStoragePrefix("__mv_storage__"));
+                .setMaterializedViewStoragePrefix("__mv_storage__")
+                .setMaterializedViewDefaultStorageSchema(null)
+                .setMaterializedViewMaxChangedPartitions(100)
+                .setMaterializedViewDefaultMaxSnapshotsPerRefresh(0)
+                .setAggregatePushDownEnabled(true)
+                .setTargetMaxFileSize(succinctDataSize(1, GIGABYTE)));
     }
 
     @Test
@@ -111,6 +117,11 @@ public class TestIcebergConfig
                 .put("iceberg.max-statistics-file-cache-size", "512MB")
                 .put("iceberg.statistics-kll-sketch-k-parameter", "4096")
                 .put("iceberg.materialized-view-storage-prefix", "custom_mv_prefix")
+                .put("iceberg.materialized-view-default-storage-schema", "_mv_storage")
+                .put("iceberg.materialized-view-max-changed-partitions", "2000")
+                .put("iceberg.materialized-view-default-max-snapshots-per-refresh", "10")
+                .put("iceberg.aggregate-push-down-enabled", "false")
+                .put("iceberg.target-max-file-size", "512MB")
                 .build();
 
         IcebergConfig expected = new IcebergConfig()
@@ -143,7 +154,12 @@ public class TestIcebergConfig
                 .setMetricsMaxInferredColumn(16)
                 .setMaxStatisticsFileCacheSize(succinctDataSize(512, MEGABYTE))
                 .setStatisticsKllSketchKParameter(4096)
-                .setMaterializedViewStoragePrefix("custom_mv_prefix");
+                .setMaterializedViewStoragePrefix("custom_mv_prefix")
+                .setMaterializedViewDefaultStorageSchema("_mv_storage")
+                .setMaterializedViewMaxChangedPartitions(2000)
+                .setMaterializedViewDefaultMaxSnapshotsPerRefresh(10)
+                .setAggregatePushDownEnabled(false)
+                .setTargetMaxFileSize(succinctDataSize(512, MEGABYTE));
 
         assertFullMapping(properties, expected);
     }

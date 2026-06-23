@@ -100,6 +100,17 @@ To avoid these problems:
 
 The corresponding session property is :ref:`admin/properties-session:\`\`check_access_control_on_utilized_columns_only\`\``.
 
+``always-analyze-create-table-query-enabled``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+When enabled, ``CREATE TABLE AS SELECT IF NOT EXISTS`` statements that target an existing table will still
+analyze the inner ``SELECT`` query.
+
+The corresponding session property is :ref:`admin/properties-session:\`\`always_analyze_create_table_query_enabled\`\``.
+
 ``eager-plan-validation-enabled``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -156,7 +167,7 @@ The maximum size of the request header from the HTTP server.
 
 Note: The default value can cause errors when large session properties
 or other large session information is involved.
-See :ref:`troubleshoot/query:\`\`Request Header Fields Too Large\`\``.
+See :ref:`troubleshoot/query:Request Header Fields Too Large`.
 
 ``offset-clause-enabled``
 ^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -226,10 +237,10 @@ Memory Management Properties
 * **Type:** ``data size``
 * **Default value:** ``JVM max memory * 0.1``
 
-This is the max amount of user memory a query can use on a worker.
+This is the maximum amount of user memory a query can use on a worker.
 User memory is allocated during execution for things that are directly
 attributable to or controllable by a user query. For example, memory used
-by the hash tables built during execution, memory used during sorting, etc.
+by the hash tables built during execution, or memory used during sorting.
 When the user memory allocation of a query on any worker hits this limit
 it will be killed.
 
@@ -242,7 +253,7 @@ it will be killed.
 This is the max amount of user and system memory a query can use on a worker.
 System memory is allocated during execution for things that are not directly
 attributable to or controllable by a user query. For example, memory allocated
-by the readers, writers, network buffers, etc. When the sum of the user and
+by the readers, writers, and network buffers. When the sum of the user and
 system memory allocated by a query on any worker hits this limit it will be killed.
 The value of ``query.max-total-memory-per-node`` must be greater than
 ``query.max-memory-per-node``.
@@ -256,7 +267,7 @@ The value of ``query.max-total-memory-per-node`` must be greater than
 This is the max amount of user memory a query can use across the entire cluster.
 User memory is allocated during execution for things that are directly
 attributable to or controllable by a user query. For example, memory used
-by the hash tables built during execution, memory used during sorting, etc.
+by the hash tables built during execution, or memory used during sorting.
 When the user memory allocation of a query across all workers hits this limit
 it will be killed.
 
@@ -269,7 +280,7 @@ it will be killed.
 This is the max amount of user and system memory a query can use across the entire cluster.
 System memory is allocated during execution for things that are not directly
 attributable to or controllable by a user query. For example, memory allocated
-by the readers, writers, network buffers, etc. When the sum of the user and
+by the readers, writers, and network buffers. When the sum of the user and
 system memory allocated by a query across all workers hits this limit it will be
 killed. The value of ``query.max-total-memory`` must be greater than
 ``query.max-memory``.
@@ -690,7 +701,7 @@ or thousands of workers.
 
 Number of threads used to handle timeouts when generating HTTP responses. This value
 should be increased if all the threads are frequently in use. This can be monitored
-via the ``com.facebook.presto.server:name=AsyncHttpExecutionMBean:TimeoutExecutor``
+with the ``com.facebook.presto.server:name=AsyncHttpExecutionMBean:TimeoutExecutor``
 JMX object. If ``ActiveCount`` is always the same as ``PoolSize``, increase the
 number of threads.
 
@@ -725,8 +736,8 @@ Sets the number of threads used by workers to process splits. Increasing this nu
 can improve throughput if worker CPU utilization is low and all the threads are in use,
 but will cause increased heap space usage. Setting the value too high may cause a drop
 in performance due to a context switching. The number of active threads is available
-via the ``RunningSplits`` property of the
-``com.facebook.presto.execution.executor:name=TaskExecutor.RunningSplits`` JXM object.
+through the ``RunningSplits`` property of the
+``com.facebook.presto.execution.executor:name=TaskExecutor.RunningSplits`` JMX object.
 
 The number of threads can be configured using either an absolute value (for example, ``10``)
 or a value relative to the number of available CPU cores (for example, ``1.5C``). When
@@ -785,7 +796,7 @@ The target value for the number of splits that can be running for
 each worker node, assuming all splits have the standard split weight.
 
 Using a higher value is recommended if queries are submitted in large batches
-(e.g., running a large group of reports periodically) or for connectors that
+(such as running a large group of reports periodically) or for connectors that
 produce many splits that complete quickly but do not support assigning split
 weight values to express that to the split scheduler. Increasing this value
 may improve query latency by ensuring that the workers have enough splits to
@@ -922,6 +933,46 @@ create them).
 The single distinct optimization will try to replace multiple ``DISTINCT`` clauses
 with a single ``GROUP BY`` clause, which can be substantially faster to execute.
 
+``optimizer.pre-aggregate-before-grouping-sets``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+When enabled, inserts a partial aggregation below the ``GroupId`` node in grouping sets
+queries to reduce the number of rows that ``GroupId`` multiplies across grouping sets.
+Only applies to decomposable aggregation functions.
+
+The corresponding session property is :ref:`admin/properties-session:\`\`pre_aggregate_before_grouping_sets\`\``.
+
+``optimizer.parallelize-chained-aggregation``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+When enabled, optimizes chained aggregations where the outer grouping keys are a subset of
+the inner grouping keys by inserting a local round-robin exchange above the inner
+aggregation. This parallelizes the outer ``PARTIAL`` across the local node's drivers when
+the inner aggregation's parallelism is below what the node can support.
+
+The corresponding session property is :ref:`admin/properties-session:\`\`parallelize_chained_aggregation\`\``.
+
+``optimizer.pull-constant-projection-above-exchange``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+Pull constant assignments in projections above remote exchanges so that constant values are
+not serialized and shuffled across the network. When enabled, constants produced by a
+``ProjectNode`` directly below a remote ``ExchangeNode`` are moved to a new ``ProjectNode``
+above the exchange, narrowing the exchange output layout. Constants used in partitioning,
+hashing, or ordering are not pulled up, and for multi-source (``UNION``) exchanges only
+constants that are identical across all sources are pulled up.
+
+The corresponding session property is :ref:`admin/properties-session:\`\`pull_constant_projection_above_exchange\`\``.
+
 ``optimizer.push-aggregation-through-join``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -943,6 +994,47 @@ the amount of data that needs to be processed by the join.  However, it may slow
 queries that have very selective joins.
 
 The corresponding session property is :ref:`admin/properties-session:\`\`push_aggregation_through_join\`\``.
+
+``optimizer.push-partial-aggregation-through-join``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+When a partial aggregation is above an inner join and all aggregation inputs come from
+only one side of the join, the partial aggregation is pushed below the join to that side.
+This reduces the amount of data flowing into the join operator, which can improve
+performance by allowing the aggregation to pre-reduce data before the join is performed.
+
+The corresponding session property is :ref:`admin/properties-session:\`\`push_partial_aggregation_through_join\`\``.
+
+``optimizer.push-semi-join-through-union``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+When enabled, pushes semi-joins through ``UNION`` sources so that each union
+branch performs the semi-join independently. This can improve performance for
+``IN`` and ``EXISTS`` queries where the semi-join probe side is a ``UNION``.
+
+The corresponding session property is :ref:`admin/properties-session:\`\`push_semi_join_through_union\`\``.
+
+``optimizer.push-projection-through-cross-join``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+When enabled, pushes projection expressions through cross join nodes so that each
+expression is evaluated only on the side of the cross join that provides its input
+variables. This reduces the number of columns flowing through the cross join and
+avoids recomputing expressions on the multiplied output rows.
+
+Only deterministic expressions are pushed. Expressions that reference variables from
+both sides of the cross join, or constant expressions, remain above the join.
+
+The corresponding session property is :ref:`admin/properties-session:\`\`push_projection_through_cross_join\`\``.
 
 ``optimizer.push-table-write-through-union``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -998,7 +1090,7 @@ null padded rows that may be produced by the outer join, the optimizer introduce
 join with corresponding aggregations over a single null value and then coalesces the aggregations
 from the join output with these null aggregated values.
 
-For certain aggregate functions (those that ignore nulls, ``COUNT``, etc) the cross join may be
+For certain aggregate functions (those that ignore nulls, ``COUNT``, and similar functions) the cross join may be
 avoided and the default/known aggregate value over ``NULL`` may be coalesced  directly with the aggregate
 outputs of the join. This optimization eliminates the cross join, may convert the outer join into an inner
 join and thereby produces more optimal plans.
@@ -1011,6 +1103,31 @@ join and thereby produces more optimal plans.
 
 Extract expressions which have constant value from filter and assignment expressions, and replace the expressions with
 constant value.
+
+``optimizer.simplify-aggregations-over-constant``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+When enabled, replaces supported aggregation functions over constant arguments
+with constant expressions. This can improve performance for queries that apply
+aggregations such as ``MIN``, ``MAX``, ``ARBITRARY``, or ``APPROX_DISTINCT`` to
+constant inputs.
+
+The corresponding session property is :ref:`admin/properties-session:\`\`simplify_aggregations_over_constant\`\``.
+
+``optimizer.simplify-coalesce-over-join-keys``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+When enabled, simplifies redundant ``COALESCE`` expressions over equi-join keys
+based on join type. This can produce simpler plans and enable additional join
+optimizations, including bucketed join optimizations.
+
+The corresponding session property is :ref:`admin/properties-session:\`\`simplify_coalesce_over_join_keys\`\``.
 
 ``optimizer.history-based-optimizer-plan-canonicalization-strategies``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1097,6 +1214,19 @@ The corresponding session property is :ref:`admin/properties-session:\`\`optimiz
 Enable push down inner join inequality predicates to database. For this configuration to be enabled, :ref:`admin/properties:\`\`optimizer.inner-join-pushdown-enabled\`\`` should be set to ``true``.
 The corresponding session property is :ref:`admin/properties-session:\`\`optimizer_inequality_join_pushdown_enabled\`\``.
 
+``optimizer.rewrite-bucketed-semi-join-to-join``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+When both sides of a semi-join are backed by tables bucketed on the semi-join key,
+rewrite the ``SemiJoinNode`` to a colocated ``LEFT JOIN`` with a ``DISTINCT`` on the
+right side. This avoids data shuffle since both sides are already co-partitioned by
+the join key.
+
+The corresponding session property is :ref:`admin/properties-session:\`\`rewrite_bucketed_semi_join_to_join\`\``.
+
 ``optimizer.use-histograms``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -1108,6 +1238,18 @@ during query optimization. When set to ``false``, this parameter prevents histog
 being collected by ``ANALYZE``, and also prevents the existing histograms from being used
 during query optimization. This behavior can be controlled on a per-query basis using the
 ``optimizer_use_histograms`` session property.
+
+``optimizer.skip-pushdown-through-exchange-for-remote-projection``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+When enabled, skips pushing remote projections through exchange nodes. This can
+preserve exchanges around projections that call external functions, where fixed
+parallelism or exchange placement is needed to control execution.
+
+The corresponding session property is :ref:`admin/properties-session:\`\`skip_pushdown_through_exchange_for_remote_projection\`\``.
 
 ``optimizer.table-scan-shuffle-parallelism-threshold``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1394,7 +1536,7 @@ comprehensive coordinator load management. When both are configured:
 Without query-pacing, the cluster can admit multiple queries at once, which
 can lead to significantly more concurrent tasks than expected over this limit.
 
-Set to a lower value (e.g., ``50000``) to limit coordinator task management
+Set to a lower value such as ``50000`` to limit coordinator task management
 overhead. The default value effectively disables this feature.
 
 .. note::
@@ -1444,7 +1586,7 @@ for cross-cluster retry operations.
 Comma-separated list of error codes that allow cross-cluster retry. When a query
 fails with one of these error codes, it can be automatically retried on a backup
 cluster if a retry URL is provided. Available error codes include standard Presto
-error codes such as ``REMOTE_TASK_ERROR``, ``CLUSTER_OUT_OF_MEMORY``, etc.
+error codes such as ``REMOTE_TASK_ERROR``, ``CLUSTER_OUT_OF_MEMORY``.
 
 View and Materialized View Properties
 -------------------------------------
@@ -1499,6 +1641,20 @@ migration purposes only.
 
     This should only be enabled in non-production environments.
 
+``materialized-view-query-rewrite-cost-based-selection-enabled``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+Enable cost-based selection when multiple materialized views are available for query
+rewriting. When enabled, the optimizer evaluates all compatible materialized view rewrites
+and selects the plan with the lowest estimated cost, instead of using the first compatible
+view.
+
+The corresponding session property is
+:ref:`admin/properties-session:\`\`materialized_view_query_rewrite_cost_based_selection_enabled\`\``.
+
 ``materialized-view-stale-read-behavior``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -1509,3 +1665,230 @@ Controls behavior when a materialized view is stale and no per-view staleness co
 Valid values are ``FAIL`` (throw an error) or ``USE_VIEW_QUERY`` (query base tables instead).
 
 The corresponding session property is :ref:`admin/properties-session:\`\`materialized_view_stale_read_behavior\`\``.
+
+Grouped Execution Properties
+----------------------------
+
+``grouped-execution-enabled``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``true``
+
+Enables grouped execution for queries on bucketed tables. Grouped execution schedules
+operations in lifespans (one per bucket), processing a subset of data at a time to
+reduce memory usage.
+
+The corresponding session property is :ref:`admin/properties-session:\`\`grouped_execution\`\``.
+
+``partition-aware-grouped-execution-enabled``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+When enabled alongside ``grouped-execution-enabled``, schedules each (bucket, partition-values)
+pair as a separate lifespan instead of processing all partitions per bucket in a single lifespan.
+This reduces per-lifespan hash table size for joins and aggregations on bucketed + partitioned tables.
+
+The feature activates when partition columns appear as equi-join keys or GROUP BY keys, and at
+least 2 distinct partition values exist. When not applicable, queries fall back to standard
+grouped execution automatically.
+
+The corresponding session property is :ref:`admin/properties-session:\`\`partition_aware_grouped_execution\`\``.
+
+Cluster Overload Properties
+---------------------------
+
+These properties control cluster-overload throttling, which monitors worker CPU and
+memory utilization and throttles query admission when the cluster is under heavy load.
+Cluster-overload throttling is independent of per-resource-group concurrency, memory,
+and CPU limits, which continue to apply regardless of these settings.
+
+``cluster-overload.enable-throttling``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+Enables cluster-overload throttling. When enabled, the coordinator periodically
+checks worker health and prevents new queries from starting when the cluster is
+overloaded. When disabled, no overload checks are performed and all queries are
+admitted immediately (subject to other admission gates such as resource group limits).
+
+``cluster-overload.overload-policy-type``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``string``
+* **Allowed values:** ``overload_worker_cnt_based_throttling``, ``overload_worker_pct_based_throttling``
+* **Default value:** ``overload_worker_cnt_based_throttling``
+
+The policy used to determine whether the cluster is overloaded.
+``overload_worker_cnt_based_throttling`` declares the cluster overloaded when the
+number of overloaded workers exceeds ``cluster-overload.allowed-overload-workers-cnt``.
+``overload_worker_pct_based_throttling`` declares it overloaded when the fraction of
+overloaded workers exceeds ``cluster-overload.allowed-overload-workers-pct``.
+
+``cluster-overload.allowed-overload-workers-cnt``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``integer``
+* **Default value:** ``0``
+
+Maximum number of workers that may be in an overloaded state before the cluster is
+considered overloaded. Only used when ``cluster-overload.overload-policy-type`` is set
+to ``overload_worker_cnt_based_throttling``.
+
+``cluster-overload.allowed-overload-workers-pct``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``double``
+* **Default value:** ``0.01``
+
+Maximum fraction of workers (between 0 and 1) that may be in an overloaded state
+before the cluster is considered overloaded. Only used when
+``cluster-overload.overload-policy-type`` is set to
+``overload_worker_pct_based_throttling``.
+
+``cluster.overload-check-cache-ttl-secs``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``integer``
+* **Default value:** ``5``
+
+How frequently (in seconds) the coordinator re-evaluates the cluster overload state.
+Between checks, the most recently computed state is cached and reused.
+
+``cluster-overload.bypass-resource-groups``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``string``
+* **Default value:** (empty)
+
+Comma-separated list of fully-qualified resource group ids (dot-separated segments,
+such as ``global.admin, global.etl.priority``) that bypass cluster-overload throttling.
+Listed groups are still subject to all other admission gates — per-group concurrency,
+memory, and CPU limits continue to apply.
+
+A resource group bypasses throttling when it lies on the same root-to-leaf path as any
+configured entry: equal to a listed group, an ancestor of one, or a descendant of one.
+Sibling groups that do not appear in the list remain throttled. Path-based matching is
+required because the admission check runs at every ancestor in the resource group
+hierarchy; without it a non-listed ancestor would veto a listed leaf group.
+
+The bypass set is snapshotted at coordinator startup; changes require a coordinator
+restart. A ``throttlingBypassCount`` JMX counter on ``ClusterResourceChecker`` tracks
+how many times the bypass was applied.
+
+Malformed entries (such as ``global..admin``) cause a startup failure.
+
+Resource Manager Properties
+---------------------------
+
+``resource-manager-enabled``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+Set to true when a resource manager exists in the cluster.
+
+``resource-manager.http-server-enabled``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``true``
+
+Controls whether the resource manager's REST server is turned on. This will enable
+nodes to communicate with the resource manager using HTTP/S.
+
+``internal-communication.resource-manager-communication-protocol``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``string``
+* **Allowed values:** ``THRIFT``, ``HTTP``
+* **Default value:** ``THRIFT``
+
+Controls whether the node will communicate with the resource manager using Thrift,
+or HTTP/S. HTTPS are supported using the same internal communication HTTPS
+configs.
+
+To enable SSL/TLS, see :doc:`/security/internal-communication`.
+
+Driver-side Metadata Sidecar Properties
+---------------------------------------
+
+When :doc:`Presto on Spark </admin/spark>` runs on a native (Velox) execution engine,
+the driver can optionally launch a short-lived ``presto_server`` sidecar at bootstrap
+to register native-only functions into ``FunctionAndTypeManager`` before planning
+(analogous to :doc:`/plugin/native-sidecar-plugin` on the coordinator). The
+sidecar is shut down before query execution and is **disabled by default**.
+
+``built-in-sidecar-functions-enabled``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+Enables the bootstrap step that fetches native function metadata and registers it
+into ``FunctionAndTypeManager``. Must be paired with ``metadata-sidecar.enabled``.
+
+``metadata-sidecar.enabled``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+Enables the driver-side sidecar lifecycle.
+
+``metadata-sidecar.executable-path``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``string``
+* **Default value:** (unset)
+
+Absolute path to the ``presto_server`` binary on the driver host. Required when
+``metadata-sidecar.enabled=true`` unless a custom ``SidecarBinaryLocator`` binding
+is provided.
+
+``metadata-sidecar.program-arguments``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``string``
+* **Default value:** (empty)
+
+Extra whitespace-separated arguments for the sidecar binary. ``--etc_dir`` is always
+added automatically.
+
+``metadata-sidecar.startup-timeout``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``duration``
+* **Default value:** ``2m``
+
+Maximum wait for the sidecar to become reachable on its HTTP port before bootstrap
+fails.
+
+``metadata-sidecar.storage-oncall-name``, ``metadata-sidecar.storage-user-name``, ``metadata-sidecar.storage-service-name``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``string``
+* **Default value:** (empty)
+
+Optional values written into the sidecar's ``config.properties`` to satisfy
+required-property checks in deployment-specific native worker initialization paths.
+Leave unset if not required by your deployment.
+
+Geometry Properties
+-------------------
+
+``legacy-st-equals``
+^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+Enable legacy behavior for the ``ST_Equals`` geospatial function.
+See ``ST_Equals`` in :ref:`functions/geospatial:Relationship Tests` for details on the behavior differences.
+
+The corresponding session property is :ref:`admin/properties-session:\`\`legacy_st_equals\`\``.

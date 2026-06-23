@@ -45,6 +45,27 @@ that a final aggregation operation can utilize before it starts spilling to disk
 If set to ``0``, there is no limit, allowing the aggregation to consume unlimited memory resources,
 which may impact system performance.
 
+``native_max_partial_aggregation_memory``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``bigint``
+* **Default value:** ``16777216``
+
+Native Execution only. Defines the maximum memory used by partial aggregation when data reduction is not optimal.
+Default is 16MB.
+
+``native_max_extended_partial_aggregation_memory``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``bigint``
+* **Default value:** ``67108864``
+
+Native Execution only. The maximum partial aggregation memory when data reduction is optimal.
+When good data reduction is achieved through partial aggregation, more memory would be given even
+when we reach the limit of ``native_max_partial_aggregation_memory``.
+Default is 64MB.
+
+
 ``native_debug_validate_output_from_operators``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -156,6 +177,15 @@ Native Execution only. Specifies the number of bits (N)
 used to calculate the spilling partition number for hash join and RowNumber operations.
 The partition number is determined as ``2`` raised to the power of N, defining how data is partitioned during the spill process.
 
+``native_max_spill_bytes``
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``bigint``
+* **Default value:** ``107374182400``
+
+Native Execution only. The maximum allowed spill bytes.
+Default is 100GB.
+
 ``native_max_spill_file_size``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -192,6 +222,14 @@ Use this threshold to manage memory usage more efficiently during `ORDER BY` ope
 * **Default value:** ``true``
 
 Native Execution only. Enable row number spilling on native engine.
+
+``native_mark_distinct_spill_enabled``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+Native Execution only. Enable mark distinct spilling on native engine.
 
 ``native_simplified_expression_evaluation_enabled``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -590,7 +628,7 @@ compaction. The value is in the range of [0, 1). Currently only applies to
 approx_most_frequent aggregate with StringView type during global aggregation.
 
 ``native_aggregation_memory_compaction_reclaim_enabled``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 * **Type:** ``boolean``
 * **Default value:** ``false``

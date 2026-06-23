@@ -64,6 +64,7 @@ import com.facebook.presto.sql.planner.plan.ExplainAnalyzeNode;
 import com.facebook.presto.sql.planner.plan.InternalPlanVisitor;
 import com.facebook.presto.sql.planner.plan.LateralJoinNode;
 import com.facebook.presto.sql.planner.plan.MergeWriterNode;
+import com.facebook.presto.sql.planner.plan.RPCNode;
 import com.facebook.presto.sql.planner.plan.RowNumberNode;
 import com.facebook.presto.sql.planner.plan.StatisticsWriterNode;
 import com.facebook.presto.sql.planner.plan.TableFunctionNode;
@@ -121,7 +122,7 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static com.google.common.collect.Iterables.getOnlyElement;
+import static com.google.common.collect.MoreCollectors.onlyElement;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
@@ -274,7 +275,7 @@ public class AddLocalExchanges
                                     new SortNode(
                                             sortNode.getSourceLocation(),
                                             sortNode.getId(),
-                                            getOnlyElement(sortNode.getSources()),
+                                            sortNode.getSources().stream().collect(onlyElement()),
                                             sortNode.getOrderingScheme(),
                                             true,
                                             sortNode.getPartitionBy()),
@@ -884,6 +885,16 @@ public class AddLocalExchanges
         public PlanWithProperties visitMergeWriter(MergeWriterNode node, StreamPreferredProperties parentPreferences)
         {
             return visitPartitionedWriter(node);
+        }
+
+        @Override
+        public PlanWithProperties visitRPC(RPCNode node, StreamPreferredProperties parentPreferences)
+        {
+            // RPCNode benefits from multiple drivers for concurrent RPC dispatch.
+            // For constant-only queries (1 row, no table source), the C++
+            // RPCPlanNodeTranslator::maxDrivers() forces single-driver to avoid
+            // ROUND_ROBIN distribution issues.
+            return planAndEnforceChildren(node, parentPreferences.withDefaultParallelism(session), parentPreferences.withDefaultParallelism(session));
         }
 
         @Override

@@ -22,11 +22,12 @@
 #include "presto_cpp/main/CoordinatorDiscoverer.h"
 #include "presto_cpp/main/PeriodicMemoryChecker.h"
 #include "presto_cpp/main/PeriodicTaskManager.h"
-#include "presto_cpp/main/SessionProperties.h"
+#include "presto_cpp/main/PrestoToVeloxQueryConfig.h"
 #include "presto_cpp/main/SignalHandler.h"
 #include "presto_cpp/main/TaskResource.h"
 #include "presto_cpp/main/common/ConfigReader.h"
 #include "presto_cpp/main/common/Counters.h"
+#include "presto_cpp/main/common/LegacyHiveConfigKeys.h"
 #include "presto_cpp/main/common/Utils.h"
 #include "presto_cpp/main/connectors/Registration.h"
 #include "presto_cpp/main/connectors/SystemConnector.h"
@@ -40,10 +41,13 @@
 #include "presto_cpp/main/operators/BroadcastExchangeSource.h"
 #include "presto_cpp/main/operators/BroadcastWrite.h"
 #include "presto_cpp/main/operators/LocalShuffle.h"
+#include "presto_cpp/main/operators/MaterializedExchange.h"
+#include "presto_cpp/main/operators/MaterializedOutput.h"
 #include "presto_cpp/main/operators/PartitionAndSerialize.h"
 #include "presto_cpp/main/operators/ShuffleExchangeSource.h"
 #include "presto_cpp/main/operators/ShuffleRead.h"
 #include "presto_cpp/main/operators/ShuffleWrite.h"
+#include "presto_cpp/main/properties/session/SessionProperties.h"
 #include "presto_cpp/main/types/ExpressionOptimizer.h"
 #include "presto_cpp/main/types/PrestoToVeloxQueryPlan.h"
 #include "presto_cpp/main/types/VeloxPlanConversion.h"
@@ -55,6 +59,7 @@
 #include "velox/common/file/FileSystems.h"
 #include "velox/common/memory/SharedArbitrator.h"
 #include "velox/connectors/Connector.h"
+#include "velox/connectors/ConnectorRegistry.h"
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/connectors/hive/storage_adapters/abfs/RegisterAbfsFileSystem.h"
 #include "velox/connectors/hive/storage_adapters/gcs/RegisterGcsFileSystem.h"
@@ -69,6 +74,8 @@
 #include "velox/dwio/text/RegisterTextWriter.h"
 #include "velox/exec/OutputBufferManager.h"
 #include "velox/exec/TraceUtil.h"
+#include "velox/exec/rpc/RPCPlanNodeTranslator.h"
+#include "velox/expression/rpc/AsyncRPCFunctionRegistry.h"
 #include "velox/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "velox/functions/prestosql/registration/RegistrationFunctions.h"
 #include "velox/functions/prestosql/window/WindowFunctionsRegistration.h"
@@ -221,19 +228,31 @@ json::array_t getOptimizedExpressions(
 
   static constexpr char const* kTimezoneHeader = "X-Presto-Time-Zone";
   const auto& timezone = httpHeaders.getSingleOrEmpty(kTimezoneHeader);
-  std::unordered_map<std::string, std::string> config(
-      {{velox::core::QueryConfig::kSessionTimezone, timezone},
-       {velox::core::QueryConfig::kAdjustTimestampToTimezone, "true"}});
-  auto queryConfig = velox::core::QueryConfig{std::move(config)};
+
+  static constexpr char const* kSessionStartTimeHeader =
+      "X-Presto-Session-Start-Time";
+  const auto& sessionStartTime =
+      httpHeaders.getSingleOrEmpty(kSessionStartTimeHeader);
+
+  protocol::ExpressionOptimizationRequest request =
+      json::parse(util::extractMessageBody(body));
+
+  const std::map<std::string, std::string> sessionProperties =
+      request.sessionProperties;
+  auto configs = toVeloxConfigsFromSessionProperties(sessionProperties);
+  configs.insert({velox::core::QueryConfig::kSessionTimezone, timezone});
+  configs.insert(
+      {velox::core::QueryConfig::kAdjustTimestampToTimezone, "true"});
+  configs.insert(
+      {velox::core::QueryConfig::kSessionStartTime, sessionStartTime});
+
+  auto queryConfig = velox::core::QueryConfig{std::move(configs)};
   auto queryCtx =
       velox::core::QueryCtx::create(executor, std::move(queryConfig));
 
-  json input = json::parse(util::extractMessageBody(body));
-  VELOX_USER_CHECK(input.is_array(), "Body of request should be a JSON array.");
-  const json::array_t expressionList = static_cast<json::array_t>(input);
   std::vector<RowExpressionPtr> expressions;
-  for (const auto& j : expressionList) {
-    expressions.push_back(j);
+  for (const auto& expr : request.expressions) {
+    expressions.push_back(expr);
   }
   const auto optimizedList = expression::optimizeExpressions(
       expressions, optimizerLevel, queryCtx.get(), pool);
@@ -287,6 +306,8 @@ void PrestoServer::run() {
   initializeVeloxMemory();
   initializeThreadPools();
 
+  registerDynamicFunctions();
+
   auto catalogNames = registerVeloxConnectors(fs::path(configDirectoryPath_));
 
   initializeHttpServer();
@@ -298,7 +319,6 @@ void PrestoServer::run() {
   registerVectorSerdes();
   registerPrestoPlanNodeSerDe();
   registerTraceNodeFactories();
-  registerDynamicFunctions();
   registerExchangeSources();
 
   initializeTaskResources();
@@ -334,7 +354,8 @@ void PrestoServer::run() {
       taskManager_.get(),
       memoryAllocator,
       asyncDataCache,
-      velox::connector::getAllConnectors(),
+      velox::connector::ConnectorRegistry::findAll<
+          velox::connector::hive::HiveConnector>(),
       this);
   addServerPeriodicTasks();
   addAdditionalPeriodicTasks();
@@ -771,14 +792,30 @@ void PrestoServer::stopAnnouncer() {
 }
 
 void PrestoServer::joinExecutors() {
+  // Join exchange HTTP CPU executor first. Exchange CPU threads run
+  // PrestoExchangeSource::handleDataResponse which dispatches callbacks to
+  // driverExecutor_ (MonitoredExecutor) via ExchangeClient. We must drain
+  // these threads before destroying driverExecutor_ to avoid use-after-free.
+  PRESTO_SHUTDOWN_LOG(INFO)
+      << "Joining Exchange Http CPU executor '"
+      << exchangeHttpCpuExecutor_->getName()
+      << "': threads: " << exchangeHttpCpuExecutor_->numActiveThreads() << "/"
+      << exchangeHttpCpuExecutor_->numThreads();
+  exchangeHttpCpuExecutor_->join();
+
   PRESTO_SHUTDOWN_LOG(INFO)
       << "Joining Driver CPU Executor '" << driverCpuExecutor_->getName()
       << "': threads: " << driverCpuExecutor_->numActiveThreads() << "/"
       << driverCpuExecutor_->numThreads()
       << ", task queue: " << driverCpuExecutor_->getTaskQueueSize();
+  driverCpuExecutor_->join();
   // Schedule release of SessionPools held by HttpClients before the exchange
   // HTTP IO executor threads are joined.
   driverExecutor_.reset();
+
+  // Release exchange CPU executor resources after driverExecutor_ is reset,
+  // before exchange IO threads are joined.
+  exchangeHttpCpuExecutor_.reset();
 
   if (connectorCpuExecutor_) {
     PRESTO_SHUTDOWN_LOG(INFO)
@@ -813,16 +850,6 @@ void PrestoServer::joinExecutors() {
         << httpSrvIoExecutor_->numThreads();
     httpSrvIoExecutor_->join();
   }
-
-  PRESTO_SHUTDOWN_LOG(INFO)
-      << "Joining Exchange Http CPU executor '"
-      << exchangeHttpCpuExecutor_->getName()
-      << "': threads: " << exchangeHttpCpuExecutor_->numActiveThreads() << "/"
-      << exchangeHttpCpuExecutor_->numThreads();
-  exchangeHttpCpuExecutor_->join();
-  // Schedule release of SessionPools held by HttpClients before the exchange
-  // HTTP IO executor threads are joined.
-  exchangeHttpCpuExecutor_.reset();
 
   if (exchangeSourceConnectionPool_) {
     // Connection pool needs to be destroyed after CPU threads are joined but
@@ -931,7 +958,7 @@ class BatchThreadFactory : public folly::NamedThreadFactory {
 #endif
 
 void PrestoServer::initializeThreadPools() {
-  const auto hwConcurrency = folly::hardware_concurrency();
+  const auto hwConcurrency = folly::available_concurrency();
   auto* systemConfig = SystemConfig::instance();
 
   const auto numDriverCpuThreads = std::max<size_t>(
@@ -975,7 +1002,7 @@ void PrestoServer::initializeThreadPools() {
   }
   const auto numExchangeHttpClientIoThreads = std::max<size_t>(
       systemConfig->exchangeHttpClientNumIoThreadsHwMultiplier() *
-          folly::hardware_concurrency(),
+          folly::available_concurrency(),
       1);
   exchangeHttpIoExecutor_ = std::make_unique<folly::IOThreadPoolExecutor>(
       numExchangeHttpClientIoThreads,
@@ -995,7 +1022,7 @@ void PrestoServer::initializeThreadPools() {
 
   const auto numExchangeHttpClientCpuThreads = std::max<size_t>(
       systemConfig->exchangeHttpClientNumCpuThreadsHwMultiplier() *
-          folly::hardware_concurrency(),
+          folly::available_concurrency(),
       1);
 
   exchangeHttpCpuExecutor_ = std::make_unique<folly::CPUThreadPoolExecutor>(
@@ -1367,7 +1394,7 @@ std::vector<std::string> PrestoServer::registerVeloxConnectors(
 
   const auto numConnectorCpuThreads = std::max<size_t>(
       SystemConfig::instance()->connectorNumCpuThreadsHwMultiplier() *
-          folly::hardware_concurrency(),
+          folly::available_concurrency(),
       0);
   if (numConnectorCpuThreads > 0) {
     connectorCpuExecutor_ = std::make_unique<folly::CPUThreadPoolExecutor>(
@@ -1381,7 +1408,7 @@ std::vector<std::string> PrestoServer::registerVeloxConnectors(
 
   const auto numConnectorIoThreads = std::max<size_t>(
       SystemConfig::instance()->connectorNumIoThreadsHwMultiplier() *
-          folly::hardware_concurrency(),
+          folly::available_concurrency(),
       0);
   if (numConnectorIoThreads > 0) {
     connectorIoExecutor_ = std::make_unique<folly::IOThreadPoolExecutor>(
@@ -1402,6 +1429,11 @@ std::vector<std::string> PrestoServer::registerVeloxConnectors(
           fileName.substr(0, fileName.size() - kPropertiesExtension.size());
 
       auto connectorConf = util::readConfig(entry.path());
+      auto connectorName =
+          util::requiredProperty(connectorConf, kConnectorName);
+
+      util::migrateLegacyHiveParquetKeys(connectorName, connectorConf);
+
       PRESTO_STARTUP_LOG(INFO)
           << "Registered catalog property keys from " << entry.path() << ":\n"
           << logConnectorConfigPropertyKeys(connectorConf);
@@ -1409,8 +1441,6 @@ std::vector<std::string> PrestoServer::registerVeloxConnectors(
       std::shared_ptr<const velox::config::ConfigBase> properties =
           std::make_shared<const velox::config::ConfigBase>(
               std::move(connectorConf));
-
-      auto connectorName = util::requiredProperty(*properties, kConnectorName);
 
       catalogNames.emplace_back(catalogName);
 
@@ -1442,27 +1472,8 @@ void PrestoServer::registerSystemConnector() {
 
 void PrestoServer::unregisterConnectors() {
   PRESTO_SHUTDOWN_LOG(INFO) << "Unregistering connectors";
-  auto connectors = velox::connector::getAllConnectors();
-  if (connectors.empty()) {
-    PRESTO_SHUTDOWN_LOG(INFO) << "No connectors to unregister";
-    return;
-  }
-
-  PRESTO_SHUTDOWN_LOG(INFO)
-      << "Unregistering " << connectors.size() << " connectors";
-  for (const auto& connectorEntry : connectors) {
-    if (velox::connector::unregisterConnector(connectorEntry.first)) {
-      PRESTO_SHUTDOWN_LOG(INFO)
-          << "Unregistered connector: " << connectorEntry.first;
-    } else {
-      PRESTO_SHUTDOWN_LOG(INFO)
-          << "Unable to unregister connector: " << connectorEntry.first;
-    }
-  }
-
-  velox::connector::unregisterConnector("$system@system");
-  PRESTO_SHUTDOWN_LOG(INFO)
-      << "Unregistered " << connectors.size() << " connectors";
+  velox::connector::ConnectorRegistry::unregisterAll();
+  PRESTO_SHUTDOWN_LOG(INFO) << "Unregistered all connectors";
 }
 
 void PrestoServer::registerShuffleInterfaceFactories() {
@@ -1478,11 +1489,20 @@ void PrestoServer::registerCustomOperators() {
       std::make_unique<operators::ShuffleWriteTranslator>());
   velox::exec::Operator::registerOperator(
       std::make_unique<operators::ShuffleReadTranslator>());
+  velox::exec::Operator::registerOperator(
+      std::make_unique<operators::MaterializedOutputTranslator>());
+  velox::exec::Operator::registerOperator(
+      std::make_unique<operators::MaterializedExchangeTranslator>());
 
   // Todo - Split Presto & Presto-on-Spark server into different classes
   // which will allow server specific operator registration.
   velox::exec::Operator::registerOperator(
       std::make_unique<operators::BroadcastWriteTranslator>());
+
+  // Register RPC plan node translator for async RPC execution.
+  // This enables RPCOperator to be created from RPCNode plan nodes
+  // when fb_llm_inference is detected.
+  velox::exec::rpc::registerRPCPlanNodeTranslator();
 }
 
 void PrestoServer::registerFunctions() {
@@ -1503,6 +1523,17 @@ void PrestoServer::registerFunctions() {
   functions::aggregate::theta_sketch::registerAllThetaSketchFunctions(
       prestoBuiltinFunctionPrefix_);
 #endif
+
+  // Register RPC function stubs so the sidecar's /v1/functions endpoint
+  // exposes them to the coordinator for function discovery.
+  LOG(INFO) << "[RPC] Registering RPC function stubs "
+            << "with namespace prefix '" << prestoBuiltinFunctionPrefix_ << "'";
+  velox::exec::rpc::AsyncRPCFunctionRegistry::registerStubs(
+      prestoBuiltinFunctionPrefix_);
+  LOG(INFO) << "[RPC] Registered stubs for "
+            << velox::exec::rpc::AsyncRPCFunctionRegistry::registeredFunctions()
+                   .size()
+            << " RPC function(s).";
 }
 
 void PrestoServer::registerRemoteFunctions() {
@@ -1538,15 +1569,13 @@ void PrestoServer::registerVectorSerdes() {
   if (!velox::isRegisteredVectorSerde()) {
     velox::serializer::presto::PrestoVectorSerde::registerVectorSerde();
   }
-  if (!velox::isRegisteredNamedVectorSerde(velox::VectorSerde::Kind::kPresto)) {
+  if (!velox::isRegisteredNamedVectorSerde("Presto")) {
     velox::serializer::presto::PrestoVectorSerde::registerNamedVectorSerde();
   }
-  if (!velox::isRegisteredNamedVectorSerde(
-          velox::VectorSerde::Kind::kCompactRow)) {
+  if (!velox::isRegisteredNamedVectorSerde("CompactRow")) {
     velox::serializer::CompactRowVectorSerde::registerNamedVectorSerde();
   }
-  if (!velox::isRegisteredNamedVectorSerde(
-          velox::VectorSerde::Kind::kUnsafeRow)) {
+  if (!velox::isRegisteredNamedVectorSerde("UnsafeRow")) {
     velox::serializer::spark::UnsafeRowVectorSerde::registerNamedVectorSerde();
   }
 }
@@ -1709,7 +1738,7 @@ void PrestoServer::checkOverload() {
     memOverloaded_ = memOverloaded;
   }
 
-  static const auto hwConcurrency = folly::hardware_concurrency();
+  static const auto hwConcurrency = folly::available_concurrency();
   const auto overloadedThresholdCpuPct =
       systemConfig->workerOverloadedThresholdCpuPct();
   const auto overloadedThresholdQueuedDrivers = hwConcurrency *
@@ -1904,7 +1933,7 @@ protocol::NodeStatus PrestoServer::fetchNodeStatus() {
       address_,
       address_,
       **memoryInfo_.rlock(),
-      (int)folly::hardware_concurrency(),
+      (int)folly::available_concurrency(),
       cpuLoadPct,
       cpuLoadPct,
       pool_ ? pool_->usedBytes() : 0,

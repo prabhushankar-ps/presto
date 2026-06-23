@@ -29,6 +29,7 @@ import com.facebook.presto.spi.MaterializedViewDefinition;
 import com.facebook.presto.spi.MaterializedViewStatus;
 import com.facebook.presto.spi.MergeHandle;
 import com.facebook.presto.spi.NewTableLayout;
+import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.SystemTable;
 import com.facebook.presto.spi.TableHandle;
 import com.facebook.presto.spi.TableLayoutFilterCoverage;
@@ -196,6 +197,30 @@ public class StatsRecordingMetadataManager
     }
 
     @Override
+    public OutputTableHandle beginCreateVectorIndex(Session session, String catalogName, ConnectorTableMetadata indexMetadata, Optional<NewTableLayout> layout, SchemaTableName sourceTableName)
+    {
+        long startTime = System.nanoTime();
+        try {
+            return delegate.beginCreateVectorIndex(session, catalogName, indexMetadata, layout, sourceTableName);
+        }
+        finally {
+            stats.recordBeginCreateVectorIndexCall(System.nanoTime() - startTime);
+        }
+    }
+
+    @Override
+    public Optional<ConnectorOutputMetadata> finishCreateVectorIndex(Session session, OutputTableHandle tableHandle, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
+    {
+        long startTime = System.nanoTime();
+        try {
+            return delegate.finishCreateVectorIndex(session, tableHandle, fragments, computedStatistics);
+        }
+        finally {
+            stats.recordFinishCreateVectorIndexCall(System.nanoTime() - startTime);
+        }
+    }
+
+    @Override
     public Optional<NewTableLayout> getInsertLayout(Session session, TableHandle target)
     {
         long startTime = System.nanoTime();
@@ -280,11 +305,11 @@ public class StatsRecordingMetadataManager
     }
 
     @Override
-    public InsertTableHandle beginInsert(Session session, TableHandle tableHandle)
+    public InsertTableHandle beginInsert(Session session, TableHandle tableHandle, List<String> insertColumnNames)
     {
         long startTime = System.nanoTime();
         try {
-            return delegate.beginInsert(session, tableHandle);
+            return delegate.beginInsert(session, tableHandle, insertColumnNames);
         }
         finally {
             stats.recordBeginInsertCall(System.nanoTime() - startTime);
@@ -588,6 +613,18 @@ public class StatsRecordingMetadataManager
         }
         finally {
             stats.recordDropMaterializedViewCall(System.nanoTime() - startTime);
+        }
+    }
+
+    @Override
+    public void setMaterializedViewProperties(Session session, QualifiedObjectName viewName, Map<String, Object> properties)
+    {
+        long startTime = System.nanoTime();
+        try {
+            delegate.setMaterializedViewProperties(session, viewName, properties);
+        }
+        finally {
+            stats.recordSetTablePropertiesCall(System.nanoTime() - startTime);
         }
     }
 
@@ -1122,6 +1159,18 @@ public class StatsRecordingMetadataManager
     }
 
     @Override
+    public void setColumnType(Session session, TableHandle tableHandle, ColumnHandle column, Type type)
+    {
+        long startTime = System.nanoTime();
+        try {
+            delegate.setColumnType(session, tableHandle, column, type);
+        }
+        finally {
+            stats.recordSetColumnTypeCall(System.nanoTime() - startTime);
+        }
+    }
+
+    @Override
     public void dropColumn(Session session, TableHandle tableHandle, ColumnHandle column)
     {
         long startTime = System.nanoTime();
@@ -1142,6 +1191,18 @@ public class StatsRecordingMetadataManager
         }
         finally {
             stats.recordRenameColumnCall(System.nanoTime() - startTime);
+        }
+    }
+
+    @Override
+    public void setColumnDefault(Session session, TableHandle tableHandle, String columnName, Object defaultValue)
+    {
+        long startTime = System.nanoTime();
+        try {
+            delegate.setColumnDefault(session, tableHandle, columnName, defaultValue);
+        }
+        finally {
+            stats.recordSetColumnDefaultCall(System.nanoTime() - startTime);
         }
     }
 

@@ -88,6 +88,7 @@ import com.facebook.presto.sql.tree.LogicalBinaryExpression;
 import com.facebook.presto.sql.tree.LongLiteral;
 import com.facebook.presto.sql.tree.Merge;
 import com.facebook.presto.sql.tree.MergeCase;
+import com.facebook.presto.sql.tree.MergeDelete;
 import com.facebook.presto.sql.tree.MergeInsert;
 import com.facebook.presto.sql.tree.MergeUpdate;
 import com.facebook.presto.sql.tree.Node;
@@ -115,8 +116,8 @@ import com.google.common.base.VerifyException;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
+import com.google.common.collect.Streams;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -127,6 +128,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import static com.facebook.presto.SystemSessionProperties.isSkipRedundantSort;
 import static com.facebook.presto.common.type.BigintType.BIGINT;
@@ -135,6 +137,7 @@ import static com.facebook.presto.common.type.IntegerType.INTEGER;
 import static com.facebook.presto.common.type.TinyintType.TINYINT;
 import static com.facebook.presto.common.type.VarbinaryType.VARBINARY;
 import static com.facebook.presto.common.type.VarcharType.VARCHAR;
+import static com.facebook.presto.spi.ConnectorMergeSink.DELETE_OPERATION_NUMBER;
 import static com.facebook.presto.spi.ConnectorMergeSink.INSERT_OPERATION_NUMBER;
 import static com.facebook.presto.spi.ConnectorMergeSink.UPDATE_OPERATION_NUMBER;
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_LIMIT_CLAUSE;
@@ -171,6 +174,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static com.google.common.collect.MoreCollectors.onlyElement;
 import static com.google.common.collect.Streams.stream;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -224,7 +228,7 @@ public class QueryPlanner
         builder = handleSubqueries(builder, query, orderBy);
         List<Expression> outputs = analysis.getOutputExpressions(query);
         builder = handleSubqueries(builder, query, outputs);
-        builder = project(builder, Iterables.concat(orderBy, outputs));
+        builder = project(builder, Stream.concat(orderBy.stream(), outputs.stream()).collect(toImmutableList()));
         builder = sort(builder, query);
         builder = offset(builder, query.getOffset());
         builder = limit(builder, query);
@@ -257,7 +261,7 @@ public class QueryPlanner
             else {
                 // ORDER BY requires output fields, groups and translated aggregations to be visible for queries with aggregation
                 List<Expression> orderByAggregates = analysis.getOrderByAggregates(node.getOrderBy().get());
-                builder = project(builder, Iterables.concat(outputs, orderByAggregates));
+                builder = project(builder, Stream.concat(outputs.stream(), orderByAggregates.stream()).collect(toImmutableList()));
                 outputs = toSymbolReferences(computeOutputs(builder, outputs));
                 List<Expression> complexOrderByAggregatesToRemap = orderByAggregates.stream()
                         .filter(expression -> !analysis.isColumnReference(expression))
@@ -270,7 +274,7 @@ public class QueryPlanner
 
         List<Expression> orderBy = analysis.getOrderByExpressions(node);
         builder = handleSubqueries(builder, node, orderBy);
-        builder = project(builder, Iterables.concat(orderBy, outputs));
+        builder = project(builder, Stream.concat(orderBy.stream(), outputs.stream()).collect(toImmutableList()));
 
         builder = distinct(builder, node);
         builder = sort(builder, node);
@@ -553,6 +557,13 @@ public class QueryPlanner
             Expression mergeCondition = mergeCase instanceof MergeInsert ?
                     new IsNullPredicate(targetUniqueIdColumnSymbolReference) : new IsNotNullPredicate(targetUniqueIdColumnSymbolReference);
 
+            if (mergeCase.getCondition().isPresent()) {
+                Expression caseCondition = mergeCase.getCondition().get();
+                joinSubPlan = subqueryPlanner.handleSubqueries(joinSubPlan, caseCondition, mergeStmt, sqlPlannerContext);
+                Expression rewrittenCondition = coerceIfNecessary(analysis, caseCondition, joinSubPlan.rewrite(caseCondition));
+                mergeCondition = LogicalBinaryExpression.and(mergeCondition, rewrittenCondition);
+            }
+
             whenClauses.add(new WhenClause(mergeCondition, new Row(joinResultBuilder.build())));
         }
 
@@ -727,6 +738,9 @@ public class QueryPlanner
 
     private static int getMergeCaseOperationNumber(MergeCase mergeCase)
     {
+        if (mergeCase instanceof MergeDelete) {
+            return DELETE_OPERATION_NUMBER;
+        }
         if (mergeCase instanceof MergeInsert) {
             return INSERT_OPERATION_NUMBER;
         }
@@ -859,7 +873,7 @@ public class QueryPlanner
 
     private PlanBuilder project(PlanBuilder subPlan, Iterable<Expression> expressions, RelationPlan parentRelationPlan)
     {
-        return project(subPlan, Iterables.concat(expressions, toSymbolReferences(parentRelationPlan.getFieldMappings())));
+        return project(subPlan, Stream.concat(Streams.stream(expressions), toSymbolReferences(parentRelationPlan.getFieldMappings()).stream()).collect(toImmutableList()));
     }
 
     private PlanBuilder project(PlanBuilder subPlan, Iterable<Expression> expressions)
@@ -1024,10 +1038,10 @@ public class QueryPlanner
                 .map(Optional::get)
                 .forEach(arguments::add);
 
-        Iterable<Expression> inputs = Iterables.concat(groupByExpressions, arguments.build());
+        List<Expression> inputs = Stream.concat(groupByExpressions.stream(), arguments.build().stream()).collect(toImmutableList());
         subPlan = handleSubqueries(subPlan, node, inputs);
 
-        if (!Iterables.isEmpty(inputs)) { // avoid an empty projection if the only aggregation is COUNT (which has no arguments)
+        if (!inputs.isEmpty()) { // avoid an empty projection if the only aggregation is COUNT (which has no arguments)
             subPlan = project(subPlan, inputs);
         }
 
@@ -1317,7 +1331,7 @@ public class QueryPlanner
             ImmutableList.Builder<Expression> inputsBuilder = ImmutableList.<Expression>builder()
                     .addAll(windowFunction.getArguments())
                     .addAll(window.getPartitionBy())
-                    .addAll(Iterables.transform(getSortItemsFromOrderBy(window.getOrderBy()), SortItem::getSortKey));
+                    .addAll(getSortItemsFromOrderBy(window.getOrderBy()).stream().map(SortItem::getSortKey).collect(toImmutableList()));
 
             if (startValue.isPresent()) {
                 inputsBuilder.add(startValue.get());
@@ -1501,7 +1515,7 @@ public class QueryPlanner
         // Then, coerce the sortKey so that we can add / subtract the offset.
         // Note: for that we cannot rely on the usual mechanism of using the coerce() method. The coerce() method can only handle one coercion for a node,
         // while the sortKey node might require several different coercions, e.g. one for frame start and one for frame end.
-        Expression sortKey = Iterables.getOnlyElement(window.getOrderBy().get().getSortItems()).getSortKey();
+        Expression sortKey = window.getOrderBy().get().getSortItems().stream().collect(onlyElement()).getSortKey();
         VariableReferenceExpression sortKeyCoercedForFrameBoundCalculation = coercions.get(sortKey);
         Optional<Type> coercion = frameOffset.map(analysis::getSortKeyCoercionForFrameBoundCalculation);
         if (coercion.isPresent()) {

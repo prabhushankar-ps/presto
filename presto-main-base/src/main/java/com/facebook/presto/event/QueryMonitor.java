@@ -235,6 +235,7 @@ public class QueryMonitor
                         ofMillis(0),
                         Optional.empty(),
                         ofMillis(0),
+                        ofMillis(0),
                         0,
                         0,
                         0,
@@ -446,6 +447,7 @@ public class QueryMonitor
                 ofMillis(queryStats.getTotalPlanningTime().toMillis()),
                 Optional.of(ofMillis(queryStats.getAnalysisTime().toMillis())),
                 ofMillis(queryStats.getExecutionTime().toMillis()),
+                ofMillis(queryStats.getFinishingTime().toMillis()),
                 queryStats.getPeakRunningTasks(),
                 queryStats.getPeakUserMemoryReservation().toBytes(),
                 queryStats.getPeakTotalMemoryReservation().toBytes(),
@@ -487,6 +489,7 @@ public class QueryMonitor
                 ofMillis(0),
                 Optional.of(ofMillis(0)),
                 ofMillis(queryStats.getExecutionTime().toMillis()),
+                ofMillis(0),
                 queryStats.getPeakRunningTasks(),
                 queryStats.getPeakUserMemoryReservation().toBytes(),
                 queryStats.getPeakTotalMemoryReservation().toBytes(),
@@ -620,13 +623,7 @@ public class QueryMonitor
                     .filter(Objects::nonNull)
                     .findFirst();
 
-            Optional<List<OutputColumnMetadata>> outputColumnsMetadata = queryInfo.getOutput().get().getColumns()
-                    .map(columns -> columns.stream()
-                            .map(column -> new OutputColumnMetadata(
-                                    column.getColumnName(),
-                                    column.getColumnType(),
-                                    column.getSourceColumns()))
-                            .collect(toImmutableList()));
+            Optional<List<OutputColumnMetadata>> outputColumnsMetadata = queryInfo.getOutput().get().getColumns();
 
             output = Optional.of(
                     new QueryOutputMetadata(

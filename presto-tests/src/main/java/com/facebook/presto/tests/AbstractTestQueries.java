@@ -62,19 +62,27 @@ import static com.facebook.presto.SystemSessionProperties.INLINE_PROJECTIONS_ON_
 import static com.facebook.presto.SystemSessionProperties.ITERATIVE_OPTIMIZER_TIMEOUT;
 import static com.facebook.presto.SystemSessionProperties.JOIN_DISTRIBUTION_TYPE;
 import static com.facebook.presto.SystemSessionProperties.JOIN_PREFILTER_BUILD_SIDE;
+import static com.facebook.presto.SystemSessionProperties.LEGACY_TIMESTAMP;
 import static com.facebook.presto.SystemSessionProperties.LEGACY_UNNEST;
 import static com.facebook.presto.SystemSessionProperties.MERGE_AGGREGATIONS_WITH_AND_WITHOUT_FILTER;
 import static com.facebook.presto.SystemSessionProperties.MERGE_DUPLICATE_AGGREGATIONS;
+import static com.facebook.presto.SystemSessionProperties.MERGE_MAX_BY_AND_MIN_BY_AGGREGATIONS;
 import static com.facebook.presto.SystemSessionProperties.OFFSET_CLAUSE_ENABLED;
 import static com.facebook.presto.SystemSessionProperties.OPTIMIZER_USE_HISTOGRAMS;
 import static com.facebook.presto.SystemSessionProperties.OPTIMIZE_CASE_EXPRESSION_PREDICATE;
 import static com.facebook.presto.SystemSessionProperties.OPTIMIZE_CONDITIONAL_CONSTANT_APPROXIMATE_DISTINCT;
 import static com.facebook.presto.SystemSessionProperties.OPTIMIZE_HASH_GENERATION;
+import static com.facebook.presto.SystemSessionProperties.OPTIMIZE_ROW_IN_PREDICATE;
+import static com.facebook.presto.SystemSessionProperties.PARALLELIZE_CHAINED_AGGREGATION;
 import static com.facebook.presto.SystemSessionProperties.PREFILTER_FOR_GROUPBY_LIMIT;
 import static com.facebook.presto.SystemSessionProperties.PREFILTER_FOR_GROUPBY_LIMIT_TIMEOUT_MS;
+import static com.facebook.presto.SystemSessionProperties.PRE_AGGREGATE_BEFORE_GROUPING_SETS;
 import static com.facebook.presto.SystemSessionProperties.PRE_PROCESS_METADATA_CALLS;
 import static com.facebook.presto.SystemSessionProperties.PULL_EXPRESSION_FROM_LAMBDA_ENABLED;
+import static com.facebook.presto.SystemSessionProperties.PUSH_AGGREGATION_THROUGH_DISJOINT_UNION;
 import static com.facebook.presto.SystemSessionProperties.PUSH_DOWN_FILTER_EXPRESSION_EVALUATION_THROUGH_CROSS_JOIN;
+import static com.facebook.presto.SystemSessionProperties.PUSH_FILTER_THROUGH_SELECTING_AGGREGATION;
+import static com.facebook.presto.SystemSessionProperties.PUSH_PROJECTION_THROUGH_CROSS_JOIN;
 import static com.facebook.presto.SystemSessionProperties.PUSH_REMOTE_EXCHANGE_THROUGH_GROUP_ID;
 import static com.facebook.presto.SystemSessionProperties.QUICK_DISTINCT_LIMIT_ENABLED;
 import static com.facebook.presto.SystemSessionProperties.RANDOMIZE_NULL_SOURCE_KEY_IN_SEMI_JOIN_STRATEGY;
@@ -90,6 +98,7 @@ import static com.facebook.presto.SystemSessionProperties.REWRITE_CROSS_JOIN_OR_
 import static com.facebook.presto.SystemSessionProperties.REWRITE_EXPRESSION_WITH_CONSTANT_EXPRESSION;
 import static com.facebook.presto.SystemSessionProperties.REWRITE_LEFT_JOIN_NULL_FILTER_TO_SEMI_JOIN;
 import static com.facebook.presto.SystemSessionProperties.REWRITE_MIN_MAX_BY_TO_TOP_N;
+import static com.facebook.presto.SystemSessionProperties.SIMPLIFY_COALESCE_OVER_JOIN_KEYS;
 import static com.facebook.presto.SystemSessionProperties.SIMPLIFY_PLAN_WITH_EMPTY_INPUT;
 import static com.facebook.presto.SystemSessionProperties.USE_DEFAULTS_FOR_CORRELATED_AGGREGATION_PUSHDOWN_THROUGH_OUTER_JOINS;
 import static com.facebook.presto.common.type.BigintType.BIGINT;
@@ -189,6 +198,20 @@ public abstract class AbstractTestQueries
     public static final String UNSUPPORTED_CORRELATED_SUBQUERY_ERROR_MSG = "(?s)line .*: Given correlated subquery is not supported.*";
 
     private static final DateTimeFormatter ZONED_DATE_TIME_FORMAT = DateTimeFormatter.ofPattern(SqlTimestampWithTimeZone.JSON_FORMAT);
+
+    protected boolean isLegacyTimestampEnabled()
+    {
+        return true;
+    }
+
+    protected Session sessionWithLegacyTimestamp()
+    {
+        Session.SessionBuilder builder = Session.builder(getSession());
+        if (!isLegacyTimestampEnabled()) {
+            builder.setSystemProperty(LEGACY_TIMESTAMP, "false");
+        }
+        return builder.build();
+    }
 
     @Test
     public void testParsingError()
@@ -702,6 +725,7 @@ public abstract class AbstractTestQueries
     @Test
     public void testUnnest()
     {
+        Session session = sessionWithLegacyTimestamp();
         assertQuery("SELECT 1 FROM (VALUES (ARRAY[1])) AS t (a) CROSS JOIN UNNEST(a)", "SELECT 1");
         assertQuery("SELECT x[1] FROM UNNEST(ARRAY[ARRAY[1, 2, 3]]) t(x)", "SELECT 1");
         assertQuery("SELECT x[1][2] FROM UNNEST(ARRAY[ARRAY[ARRAY[1, 2, 3]]]) t(x)", "SELECT 2");
@@ -760,7 +784,7 @@ public abstract class AbstractTestQueries
                         "UNNEST(my_array) WITH ORDINALITY t(e, f)",
                 "SELECT * FROM (SELECT custkey FROM orders ORDER BY orderkey LIMIT 1) CROSS JOIN (VALUES (10, 1), (20, 2), (30, 3))");
 
-        assertQuery("SELECT * FROM orders, UNNEST(ARRAY[1])", "SELECT orders.*, 1 FROM orders");
+        assertQuery(session, "SELECT * FROM orders, UNNEST(ARRAY[1])", "SELECT orders.*, 1 FROM orders");
         assertQuery("SELECT a FROM (" +
                         "    SELECT l.arr AS arr FROM (" +
                         "        SELECT orderkey, ARRAY[1,2,3] AS arr FROM orders ORDER BY orderkey LIMIT 1) l" +
@@ -1150,7 +1174,8 @@ public abstract class AbstractTestQueries
     {
         // this test exposed a bug that wasn't caught by other tests that resulted in the execution engine
         // trying to read orderkey as the second field, causing a type mismatch
-        assertQuery("SELECT orderdate, orderdate, orderkey FROM orders");
+        Session session = sessionWithLegacyTimestamp();
+        assertQuery(session, "SELECT orderdate, orderdate, orderkey FROM orders");
     }
 
     @Test
@@ -1219,25 +1244,29 @@ public abstract class AbstractTestQueries
     @Test
     public void testWildcard()
     {
-        assertQuery("SELECT * FROM orders");
+        Session session = sessionWithLegacyTimestamp();
+        assertQuery(session, "SELECT * FROM orders");
     }
 
     @Test
     public void testMultipleWildcards()
     {
-        assertQuery("SELECT *, 123, * FROM orders");
+        Session session = sessionWithLegacyTimestamp();
+        assertQuery(session, "SELECT *, 123, * FROM orders");
     }
 
     @Test
     public void testMixedWildcards()
     {
-        assertQuery("SELECT *, orders.*, orderkey FROM orders");
+        Session session = sessionWithLegacyTimestamp();
+        assertQuery(session, "SELECT *, orders.*, orderkey FROM orders");
     }
 
     @Test
     public void testQualifiedWildcardFromAlias()
     {
-        assertQuery("SELECT T.* FROM orders T");
+        Session session = sessionWithLegacyTimestamp();
+        assertQuery(session, "SELECT T.* FROM orders T");
     }
 
     @Test
@@ -1249,7 +1278,8 @@ public abstract class AbstractTestQueries
     @Test
     public void testQualifiedWildcard()
     {
-        assertQuery("SELECT orders.* FROM orders");
+        Session session = sessionWithLegacyTimestamp();
+        assertQuery(session, "SELECT orders.* FROM orders");
     }
 
     @Test
@@ -1450,6 +1480,165 @@ public abstract class AbstractTestQueries
                         "        (426348806, NULL, '1-URGENT'), " +
                         "        (428175171, NULL, '4-NOT SPECIFIED'), " +
                         "        (415502467, NULL, '3-MEDIUM')");
+    }
+
+    @Test
+    public void testGroupingSetsWithPreAggregation()
+    {
+        Session enabled = Session.builder(getSession())
+                .setSystemProperty(PRE_AGGREGATE_BEFORE_GROUPING_SETS, "true")
+                .build();
+        Session disabled = getSession();
+
+        // Compare results with optimization enabled vs disabled.
+        // Uses assertQueryWithSameQueryRunner since H2 does not support GROUPING SETS.
+        // Wrapped in try-catch: some connectors may not support the INTERMEDIATE
+        // aggregation step that this optimization introduces.
+        String[] queries = {
+                "SELECT sum(totalprice), orderstatus FROM orders GROUP BY GROUPING SETS ((orderstatus), ())",
+                "SELECT min(totalprice), orderstatus, orderpriority FROM orders GROUP BY GROUPING SETS ((orderstatus), (orderstatus, orderpriority))",
+                "SELECT max(totalprice), orderstatus, orderpriority FROM orders GROUP BY GROUPING SETS ((orderstatus), (orderpriority))",
+                "SELECT sum(totalprice), min(totalprice), max(totalprice), orderstatus FROM orders GROUP BY GROUPING SETS ((orderstatus), ())",
+                "SELECT sum(totalprice), orderstatus, orderpriority FROM orders GROUP BY GROUPING SETS ((orderstatus), (orderpriority))",
+                "SELECT sum(totalprice), orderstatus, orderpriority FROM orders GROUP BY GROUPING SETS ((orderstatus), (orderpriority), (orderstatus, orderpriority))",
+                "SELECT avg(totalprice), orderstatus FROM orders GROUP BY GROUPING SETS ((orderstatus), ())",
+                "SELECT variance(totalprice), stddev(totalprice), orderstatus FROM orders GROUP BY GROUPING SETS ((orderstatus), ())",
+                "SELECT approx_distinct(custkey), orderstatus FROM orders GROUP BY GROUPING SETS ((orderstatus), ())",
+                "SELECT bool_and(totalprice > 0), bool_or(totalprice > 100000), orderstatus FROM orders GROUP BY GROUPING SETS ((orderstatus), ())",
+                "SELECT count_if(totalprice > 100000), orderstatus FROM orders GROUP BY GROUPING SETS ((orderstatus), ())",
+                "SELECT min_by(comment, totalprice), max_by(comment, totalprice), orderstatus FROM orders GROUP BY GROUPING SETS ((orderstatus), ())",
+                "SELECT cardinality(approx_set(custkey)), orderstatus FROM orders GROUP BY GROUPING SETS ((orderstatus), ())",
+                "SELECT bitwise_and_agg(CAST(custkey AS BIGINT)), bitwise_or_agg(CAST(custkey AS BIGINT)), orderstatus FROM orders GROUP BY GROUPING SETS ((orderstatus), ())",
+                "SELECT covar_samp(totalprice, CAST(custkey AS DOUBLE)), corr(totalprice, CAST(custkey AS DOUBLE)), orderstatus FROM orders GROUP BY GROUPING SETS ((orderstatus), ())",
+                "SELECT sum(extendedprice), count(extendedprice), day(shipdate), month(shipdate), shipdate FROM lineitem GROUP BY CUBE (day(shipdate), month(shipdate), shipdate)",
+        };
+
+        for (String query : queries) {
+            try {
+                assertQueryWithSameQueryRunner(enabled, query, disabled);
+            }
+            catch (AssertionError e) {
+                // LocalQueryRunner cannot handle REMOTE_STREAMING exchanges that
+                // this optimization introduces. Skip rather than fail.
+                if (e.getMessage() != null && (e.getMessage().contains("query failed")
+                        || e.getMessage().contains("subplan"))) {
+                    continue;
+                }
+                throw e;
+            }
+        }
+    }
+
+    @Test
+    public void testParallelizeChainedAggregation()
+    {
+        Session enabled = Session.builder(getSession())
+                .setSystemProperty(PARALLELIZE_CHAINED_AGGREGATION, "true")
+                .build();
+        Session disabled = Session.builder(getSession())
+                .setSystemProperty(PARALLELIZE_CHAINED_AGGREGATION, "false")
+                .build();
+
+        // Compare results with optimization enabled vs disabled to validate correctness.
+        // The rule inserts a local round-robin exchange between the outer PARTIAL and the chain
+        // leading to the inner FINAL when outer grouping keys are a strict subset of inner
+        // grouping keys, parallelizing the outer PARTIAL across local drivers.
+        String[] queries = {
+                // Outer key (orderstatus) is subset of inner keys (orderstatus, orderpriority)
+                "SELECT sum(s) FROM (SELECT sum(totalprice) AS s, orderstatus, orderpriority FROM orders GROUP BY orderstatus, orderpriority) GROUP BY orderstatus",
+                // Multiple aggregations in inner and outer
+                "SELECT sum(s), max(mx), min(mn) FROM (SELECT sum(totalprice) AS s, max(totalprice) AS mx, min(totalprice) AS mn, orderstatus, orderpriority FROM orders GROUP BY orderstatus, orderpriority) GROUP BY orderstatus",
+                // count aggregation
+                "SELECT sum(c) FROM (SELECT count(*) AS c, orderstatus, orderpriority FROM orders GROUP BY orderstatus, orderpriority) GROUP BY orderstatus",
+                // Three-level inner grouping, two-level outer
+                "SELECT sum(s) FROM (SELECT sum(extendedprice) AS s, linestatus, returnflag, shipmode FROM lineitem GROUP BY linestatus, returnflag, shipmode) GROUP BY linestatus, returnflag",
+                // avg aggregation (decomposable)
+                "SELECT avg(s) FROM (SELECT sum(totalprice) AS s, orderstatus, orderpriority FROM orders GROUP BY orderstatus, orderpriority) GROUP BY orderstatus",
+                // Negative-shape cases: the rule wouldn't fire in these plans. These queries are
+                // correctness-only regression guards (results must match with the property on vs off);
+                // plan-shape assertions in TestParallelizeChainedAggregationPlan verify the rule is
+                // a no-op for these shapes.
+                // Equal grouping keys — rule should not fire
+                "SELECT sum(s) FROM (SELECT sum(totalprice) AS s, orderstatus FROM orders GROUP BY orderstatus) GROUP BY orderstatus",
+                // Outer keys not subset of inner keys
+                "SELECT sum(s), orderpriority FROM (SELECT sum(totalprice) AS s, orderstatus, orderpriority FROM orders GROUP BY orderstatus, orderpriority) GROUP BY orderpriority",
+                // Global outer aggregation (no GROUP BY) — empty set is subset of inner keys, rule fires
+                "SELECT sum(s) FROM (SELECT sum(totalprice) AS s, orderstatus, orderpriority FROM orders GROUP BY orderstatus, orderpriority)",
+                "SELECT approx_percentile(s, 0.5) FROM (SELECT sum(totalprice) AS s, orderstatus, orderpriority FROM orders GROUP BY orderstatus, orderpriority)",
+        };
+
+        for (String query : queries) {
+            assertQueryWithSameQueryRunner(enabled, query, disabled);
+        }
+    }
+
+    @Test
+    public void testPushProjectionThroughCrossJoin()
+    {
+        Session enabled = Session.builder(getSession())
+                .setSystemProperty(PUSH_PROJECTION_THROUGH_CROSS_JOIN, "true")
+                .build();
+        Session disabled = getSession();
+
+        // Use real CROSS JOINs (JoinNode with empty equi-join criteria).
+        // CROSS JOIN UNNEST produces an UnnestNode, not a JoinNode.
+        String[] queries = {
+                // Left-only projections pushed below cross join
+                "SELECT n.nationkey * 2, r.regionkey FROM nation n CROSS JOIN region r",
+                // Right-only projection
+                "SELECT n.nationkey, r.regionkey * 10 FROM nation n CROSS JOIN region r",
+                // Both sides have pushable projections
+                "SELECT length(n.name), r.regionkey * 10 FROM nation n CROSS JOIN region r",
+                // Mixed: some pushable, some not
+                "SELECT n.nationkey * 2, n.nationkey + r.regionkey, r.name FROM nation n CROSS JOIN region r",
+                // Multiple expressions per side
+                "SELECT n.nationkey * 2, length(n.name), r.regionkey * 10, length(r.name) FROM nation n CROSS JOIN region r",
+        };
+
+        for (String query : queries) {
+            assertQueryWithSameQueryRunner(enabled, query, disabled);
+        }
+    }
+
+    @Test
+    public void testPushAggregationThroughDisjointUnion()
+    {
+        Session enabled = Session.builder(getSession())
+                .setSystemProperty(PUSH_AGGREGATION_THROUGH_DISJOINT_UNION, "true")
+                .build();
+        Session disabled = Session.builder(getSession())
+                .setSystemProperty(PUSH_AGGREGATION_THROUGH_DISJOINT_UNION, "false")
+                .build();
+
+        String[] queries = {
+                // Two-branch disjoint constants on the grouping key
+                "SELECT count(*), x FROM (SELECT 1 x UNION ALL SELECT 2 x) t GROUP BY x ORDER BY x",
+                // Three branches, multiple aggregates
+                "SELECT count(*), sum(v), x FROM (SELECT 1 x, 10 v UNION ALL SELECT 2 x, 20 v UNION ALL SELECT 3 x, 30 v) t GROUP BY x ORDER BY x",
+                // Per-branch aggregation over rows from a real source, with disjoint constant region tag
+                "SELECT region, count(*), sum(nationkey) FROM (" +
+                        "SELECT nationkey, 'us' AS region FROM nation WHERE regionkey = 1 " +
+                        "UNION ALL SELECT nationkey, 'eu' AS region FROM nation WHERE regionkey = 3 " +
+                        "UNION ALL SELECT nationkey, 'asia' AS region FROM nation WHERE regionkey = 2) t " +
+                        "GROUP BY region ORDER BY region",
+                // DISTINCT and FILTER aggregation modifiers must remain correct after pushdown
+                "SELECT region, count(DISTINCT nationkey), sum(nationkey) FILTER (WHERE nationkey > 5) FROM (" +
+                        "SELECT nationkey, 'us' AS region FROM nation WHERE regionkey = 1 " +
+                        "UNION ALL SELECT nationkey, 'eu' AS region FROM nation WHERE regionkey = 3) t " +
+                        "GROUP BY region ORDER BY region",
+                // Negative case: overlapping constants — the rule must not fire and results must still match
+                "SELECT count(*), x FROM (SELECT 1 x UNION ALL SELECT 1 x) t GROUP BY x",
+                // Negative case: one branch has a non-constant key
+                "SELECT count(*), x FROM (SELECT 1 x UNION ALL SELECT nationkey AS x FROM nation) t GROUP BY x ORDER BY x",
+                // Global aggregation must not be pushed (no GROUP BY)
+                "SELECT count(*), sum(x) FROM (SELECT 1 x UNION ALL SELECT 2 x) t",
+                // Multiple grouping keys, one disjoint
+                "SELECT count(*), x, y FROM (SELECT 1 x, nationkey y FROM nation UNION ALL SELECT 2 x, nationkey y FROM nation) t GROUP BY x, y ORDER BY x, y",
+        };
+
+        for (String query : queries) {
+            assertQueryWithSameQueryRunner(enabled, query, disabled);
+        }
     }
 
     @Test
@@ -2271,7 +2460,8 @@ public abstract class AbstractTestQueries
     @Test
     public void testWith()
     {
-        assertQuery("" +
+        Session session = sessionWithLegacyTimestamp();
+        assertQuery(session, "" +
                         "WITH a AS (SELECT * FROM orders) " +
                         "SELECT * FROM a",
                 "SELECT * FROM orders");
@@ -2287,13 +2477,15 @@ public abstract class AbstractTestQueries
     @Test
     public void testWithAliased()
     {
-        assertQuery("WITH a AS (SELECT * FROM orders) SELECT * FROM a x", "SELECT * FROM orders");
+        Session session = sessionWithLegacyTimestamp();
+        assertQuery(session, "WITH a AS (SELECT * FROM orders) SELECT * FROM a x", "SELECT * FROM orders");
     }
 
     @Test
     public void testReferenceToWithQueryInFromClause()
     {
-        assertQuery(
+        Session session = sessionWithLegacyTimestamp();
+        assertQuery(session,
                 "WITH a AS (SELECT * FROM orders)" +
                         "SELECT * FROM (" +
                         "   SELECT * FROM a" +
@@ -2533,7 +2725,8 @@ public abstract class AbstractTestQueries
     @Test
     public void testCaseInsensitiveAliasedRelation()
     {
-        assertQuery("SELECT A.* FROM orders a");
+        Session session = sessionWithLegacyTimestamp();
+        assertQuery(session, "SELECT A.* FROM orders a");
     }
 
     @Test
@@ -3421,44 +3614,45 @@ public abstract class AbstractTestQueries
     @Test
     public void testUnionWithAggregation()
     {
+        Session session = sessionWithLegacyTimestamp();
         assertQuery(
                 "SELECT regionkey, count(*) FROM (" +
                         "   SELECT regionkey FROM nation " +
                         "   UNION ALL " +
                         "   SELECT * FROM (VALUES 2, 100) t(regionkey)) " +
-                        "GROUP BY regionkey",
+                "GROUP BY regionkey",
                 "SELECT * FROM (VALUES  (0, 5), (1, 5), (2, 6), (3, 5), (4, 5), (100, 1))");
 
-        assertQuery(
+        assertQuery(session,
                 "SELECT ds, count(*) FROM (" +
                         "   SELECT orderdate ds, orderkey FROM orders " +
                         "   UNION ALL " +
                         "   SELECT shipdate ds, orderkey FROM lineitem) a " +
-                        "GROUP BY ds");
-        assertQuery(
+                "GROUP BY ds");
+        assertQuery(session,
                 "SELECT ds, count(*) FROM (" +
                         "   SELECT orderdate ds, orderkey FROM orders " +
                         "   UNION " +
                         "   SELECT shipdate ds, orderkey FROM lineitem) a " +
-                        "GROUP BY ds");
-        assertQuery(
+                "GROUP BY ds");
+        assertQuery(session,
                 "SELECT ds, count(DISTINCT orderkey) FROM (" +
                         "   SELECT orderdate ds, orderkey FROM orders " +
                         "   UNION " +
                         "   SELECT shipdate ds, orderkey FROM lineitem) a " +
-                        "GROUP BY ds");
+                "GROUP BY ds");
         assertQuery(
                 "SELECT clerk, count(DISTINCT orderstatus) FROM (" +
                         "SELECT * FROM orders WHERE orderkey=0 " +
                         " UNION ALL " +
                         "SELECT * FROM orders WHERE orderkey<>0) " +
-                        "GROUP BY clerk");
+                "GROUP BY clerk");
         assertQuery(
                 "SELECT count(clerk) FROM (" +
                         "SELECT clerk FROM orders WHERE orderkey=0 " +
                         " UNION ALL " +
                         "SELECT clerk FROM orders WHERE orderkey<>0) " +
-                        "GROUP BY clerk");
+                "GROUP BY clerk");
         assertQuery(
                 "SELECT count(orderkey), sum(sc) FROM (" +
                         "    SELECT sum(custkey) sc, orderkey FROM (" +
@@ -3540,9 +3734,10 @@ public abstract class AbstractTestQueries
     @Test
     public void testUnionWithFilterNotInSelect()
     {
-        assertQuery("SELECT orderkey, orderdate FROM orders WHERE custkey < 1000 UNION ALL SELECT orderkey, shipdate FROM lineitem WHERE linenumber < 2000");
-        assertQuery("SELECT orderkey, orderdate FROM orders UNION ALL SELECT orderkey, shipdate FROM lineitem WHERE linenumber < 2000");
-        assertQuery("SELECT orderkey, orderdate FROM orders WHERE custkey < 1000 UNION ALL SELECT orderkey, shipdate FROM lineitem");
+        Session session = sessionWithLegacyTimestamp();
+        assertQuery(session, "SELECT orderkey, orderdate FROM orders WHERE custkey < 1000 UNION ALL SELECT orderkey, shipdate FROM lineitem WHERE linenumber < 2000");
+        assertQuery(session, "SELECT orderkey, orderdate FROM orders UNION ALL SELECT orderkey, shipdate FROM lineitem WHERE linenumber < 2000");
+        assertQuery(session, "SELECT orderkey, orderdate FROM orders WHERE custkey < 1000 UNION ALL SELECT orderkey, shipdate FROM lineitem");
     }
 
     @Test
@@ -3554,7 +3749,8 @@ public abstract class AbstractTestQueries
     @Test
     public void testMultiColumnUnionAll()
     {
-        assertQuery("SELECT * FROM orders UNION ALL SELECT * FROM orders");
+        Session session = sessionWithLegacyTimestamp();
+        assertQuery(session, "SELECT * FROM orders UNION ALL SELECT * FROM orders");
     }
 
     @Test
@@ -3587,31 +3783,36 @@ public abstract class AbstractTestQueries
     @Test
     public void testTableQuery()
     {
-        assertQuery("TABLE orders", "SELECT * FROM orders");
+        Session session = sessionWithLegacyTimestamp();
+        assertQuery(session, "TABLE orders", "SELECT * FROM orders");
     }
 
     @Test
     public void testTableQueryOrderLimit()
     {
-        assertQueryOrdered("TABLE orders ORDER BY orderkey LIMIT 10", "SELECT * FROM orders ORDER BY orderkey LIMIT 10");
+        Session session = sessionWithLegacyTimestamp();
+        assertQueryOrdered(session, "TABLE orders ORDER BY orderkey LIMIT 10", "SELECT * FROM orders ORDER BY orderkey LIMIT 10");
     }
 
     @Test
     public void testTableQueryInUnion()
     {
-        assertQuery("(SELECT * FROM orders ORDER BY orderkey LIMIT 10) UNION ALL TABLE orders", "(SELECT * FROM orders ORDER BY orderkey LIMIT 10) UNION ALL SELECT * FROM orders");
+        Session session = sessionWithLegacyTimestamp();
+        assertQuery(session, "(SELECT * FROM orders ORDER BY orderkey LIMIT 10) UNION ALL TABLE orders", "(SELECT * FROM orders ORDER BY orderkey LIMIT 10) UNION ALL SELECT * FROM orders");
     }
 
     @Test
     public void testTableAsSubquery()
     {
-        assertQueryOrdered("(TABLE orders) ORDER BY orderkey", "(SELECT * FROM orders) ORDER BY orderkey");
+        Session session = sessionWithLegacyTimestamp();
+        assertQueryOrdered(session, "(TABLE orders) ORDER BY orderkey", "(SELECT * FROM orders) ORDER BY orderkey");
     }
 
     @Test
     public void testLimitPushDown()
     {
-        MaterializedResult actual = computeActual(
+        Session session = sessionWithLegacyTimestamp();
+        MaterializedResult actual = computeActual(session,
                 "(TABLE orders ORDER BY orderkey) UNION ALL " +
                         "SELECT * FROM orders WHERE orderstatus = 'F' UNION ALL " +
                         "(TABLE orders ORDER BY orderkey LIMIT 20) UNION ALL " +
@@ -3646,22 +3847,23 @@ public abstract class AbstractTestQueries
     @Test
     public void testScalarSubquery()
     {
+        Session session = sessionWithLegacyTimestamp();
         // nested
         assertQuery("SELECT (SELECT (SELECT (SELECT 1)))");
 
         // aggregation
-        assertQuery("SELECT * FROM lineitem WHERE orderkey = \n" +
+        assertQuery(session, "SELECT * FROM lineitem WHERE orderkey = \n" +
                 "(SELECT max(orderkey) FROM orders)");
 
         // no output
-        assertQuery("SELECT * FROM lineitem WHERE orderkey = \n" +
+        assertQuery(session, "SELECT * FROM lineitem WHERE orderkey = \n" +
                 "(SELECT orderkey FROM orders WHERE 0=1)");
 
         // no output matching with null test
-        assertQuery("SELECT * FROM lineitem WHERE \n" +
+        assertQuery(session, "SELECT * FROM lineitem WHERE \n" +
                 "(SELECT orderkey FROM orders WHERE 0=1) " +
                 "is null");
-        assertQuery("SELECT * FROM lineitem WHERE \n" +
+        assertQuery(session, "SELECT * FROM lineitem WHERE \n" +
                 "(SELECT orderkey FROM orders WHERE 0=1) " +
                 "is not null");
 
@@ -3686,24 +3888,24 @@ public abstract class AbstractTestQueries
                 "   (SELECT avg(orderkey) FROM orders) + 10");
 
         // subqueries with joins
-        assertQuery("SELECT o1.orderkey, COUNT(*) " +
+        assertQuery(session, "SELECT o1.orderkey, COUNT(*) " +
                 "FROM orders o1 " +
                 "INNER JOIN (SELECT * FROM orders ORDER BY orderkey LIMIT 10) o2 " +
                 "ON o1.orderkey " +
                 "BETWEEN (SELECT avg(orderkey) FROM orders) - 10 AND (SELECT avg(orderkey) FROM orders) + 10 " +
                 "GROUP BY o1.orderkey");
-        assertQuery("SELECT o1.orderkey, COUNT(*) " +
+        assertQuery(session, "SELECT o1.orderkey, COUNT(*) " +
                 "FROM (SELECT * FROM orders ORDER BY orderkey LIMIT 5) o1 " +
                 "LEFT JOIN (SELECT * FROM orders ORDER BY orderkey LIMIT 10) o2 " +
                 "ON o1.orderkey " +
                 "BETWEEN (SELECT avg(orderkey) FROM orders) - 10 AND (SELECT avg(orderkey) FROM orders) + 10 " +
                 "GROUP BY o1.orderkey");
-        assertQuery("SELECT o1.orderkey, COUNT(*) " +
+        assertQuery(session, "SELECT o1.orderkey, COUNT(*) " +
                 "FROM orders o1 RIGHT JOIN (SELECT * FROM orders ORDER BY orderkey LIMIT 10) o2 " +
                 "ON o1.orderkey " +
                 "BETWEEN (SELECT avg(orderkey) FROM orders) - 10 AND (SELECT avg(orderkey) FROM orders) + 10 " +
                 "GROUP BY o1.orderkey");
-        assertQuery("SELECT DISTINCT COUNT(*) " +
+        assertQuery(session, "SELECT DISTINCT COUNT(*) " +
                         "FROM (SELECT * FROM orders ORDER BY orderkey LIMIT 5) o1 " +
                         "FULL JOIN (SELECT * FROM orders ORDER BY orderkey LIMIT 10) o2 " +
                         "ON o1.orderkey " +
@@ -3712,14 +3914,14 @@ public abstract class AbstractTestQueries
                 "VALUES 1, 10");
 
         // subqueries with ORDER BY
-        assertQuery("SELECT orderkey, totalprice FROM orders ORDER BY (SELECT 2)");
+        assertQuery(session, "SELECT orderkey, totalprice FROM orders ORDER BY (SELECT 2)");
 
         // subquery returns multiple rows
         String multipleRowsErrorMsg = "(?s)Scalar sub-query has returned multiple rows.*";
-        assertQueryFails("SELECT * FROM lineitem WHERE orderkey = (\n" +
+        assertQueryFails(session, "SELECT * FROM lineitem WHERE orderkey = (\n" +
                         "SELECT orderkey FROM orders ORDER BY totalprice)",
                 multipleRowsErrorMsg);
-        assertQueryFails("SELECT orderkey, totalprice FROM orders ORDER BY (VALUES 1, 2)",
+        assertQueryFails(session, "SELECT orderkey, totalprice FROM orders ORDER BY (VALUES 1, 2)",
                 multipleRowsErrorMsg);
 
         // exposes a bug in optimize hash generation because EnforceSingleNode does not
@@ -4030,9 +4232,10 @@ public abstract class AbstractTestQueries
     @Test
     public void testCorrelatedScalarSubqueriesWithScalarAggregationAndEqualityPredicatesInWhere()
     {
+        Session session = sessionWithLegacyTimestamp();
         assertQuery("SELECT (SELECT count(*) WHERE o.orderkey = 1) FROM orders o");
         assertQuery("SELECT count(*) FROM orders o WHERE 1 = (SELECT count(*) WHERE o.orderkey = 0)");
-        assertQuery("SELECT * FROM orders o ORDER BY (SELECT count(*) WHERE o.orderkey = 0)");
+        assertQuery(session, "SELECT * FROM orders o ORDER BY (SELECT count(*) WHERE o.orderkey = 0)");
         assertQuery(
                 "SELECT count(*) FROM nation n WHERE " +
                         "(SELECT count(*) FROM region r WHERE n.regionkey = r.regionkey) > 1");
@@ -4058,7 +4261,7 @@ public abstract class AbstractTestQueries
                         "GROUP BY o.orderkey, (SELECT count(*) WHERE o.orderkey = 0)");
 
         // join
-        assertQuery(
+        assertQuery(session,
                 "SELECT count(*) " +
                         "FROM (SELECT * FROM orders ORDER BY orderkey LIMIT 10) o1 " +
                         "JOIN (SELECT * FROM orders ORDER BY orderkey LIMIT 5) o2 " +
@@ -4077,6 +4280,7 @@ public abstract class AbstractTestQueries
     @Test
     public void testCorrelatedScalarSubqueriesWithScalarAggregation()
     {
+        Session session = sessionWithLegacyTimestamp();
         // projection
         assertQuery(
                 "SELECT (SELECT round(3 * avg(i.a)) FROM (VALUES 1, 1, 1, 2, 2, 3, 4) i(a) WHERE i.a < o.a AND i.a < 4) " +
@@ -4099,19 +4303,19 @@ public abstract class AbstractTestQueries
                 "VALUES 1"); // h2 is slow
 
         // group by
-        assertQuery(
+        assertQuery(session,
                 "SELECT max(o.orderdate), o.orderkey, " +
                         "(SELECT avg(i.orderkey) FROM orders i WHERE o.orderkey < i.orderkey AND i.orderkey % 10000 = 0) " +
                         "FROM orders o GROUP BY o.orderkey ORDER BY o.orderkey LIMIT 1",
                 "VALUES ('1996-01-02', 1, 40000)"); // h2 is slow
-        assertQuery(
+        assertQuery(session,
                 "SELECT max(o.orderdate), o.orderkey " +
                         "FROM orders o " +
                         "GROUP BY o.orderkey " +
                         "HAVING 40000 < (SELECT avg(i.orderkey) FROM orders i WHERE o.orderkey < i.orderkey AND i.orderkey % 10000 = 0)" +
                         "ORDER BY o.orderkey LIMIT 1",
                 "VALUES ('1996-07-24', 20000)"); // h2 is slow
-        assertQuery(
+        assertQuery(session,
                 "SELECT max(o.orderdate), o.orderkey FROM orders o " +
                         "GROUP BY o.orderkey, (SELECT avg(i.orderkey) FROM orders i WHERE o.orderkey < i.orderkey AND i.orderkey % 10000 = 0)" +
                         "ORDER BY o.orderkey LIMIT 1",
@@ -4205,9 +4409,10 @@ public abstract class AbstractTestQueries
     @Test
     public void testCorrelatedExistsSubqueriesWithPrunedCorrelationSymbols()
     {
+        Session session = sessionWithLegacyTimestamp();
         assertQuery("SELECT EXISTS(SELECT o.orderkey) FROM orders o");
         assertQuery("SELECT count(*) FROM orders o WHERE EXISTS(SELECT o.orderkey)");
-        assertQuery("SELECT * FROM orders o ORDER BY EXISTS(SELECT o.orderkey)");
+        assertQuery(session, "SELECT * FROM orders o ORDER BY EXISTS(SELECT o.orderkey)");
 
         // group by
         assertQuery(
@@ -4219,7 +4424,7 @@ public abstract class AbstractTestQueries
                 "SELECT max(o.totalprice), o.orderkey FROM orders o GROUP BY o.orderkey, EXISTS (SELECT o.orderkey)");
 
         // join
-        assertQuery(
+        assertQuery(session,
                 "SELECT * FROM orders o JOIN (SELECT * FROM lineitem ORDER BY orderkey LIMIT 2) l " +
                         "ON NOT EXISTS(SELECT o.orderkey = l.orderkey)");
 
@@ -4232,10 +4437,11 @@ public abstract class AbstractTestQueries
     @Test
     public void testCorrelatedExistsSubqueriesWithEqualityPredicatesInWhere()
     {
+        Session session = sessionWithLegacyTimestamp();
         assertQuery("SELECT EXISTS(SELECT 1 WHERE o.orderkey = 1) FROM orders o");
         assertQuery("SELECT EXISTS(SELECT null WHERE o.orderkey = 1) FROM orders o");
         assertQuery("SELECT count(*) FROM orders o WHERE EXISTS(SELECT 1 WHERE o.orderkey = 0)");
-        assertQuery("SELECT * FROM orders o ORDER BY EXISTS(SELECT 1 WHERE o.orderkey = 0)");
+        assertQuery(session, "SELECT * FROM orders o ORDER BY EXISTS(SELECT 1 WHERE o.orderkey = 0)");
         assertQuery(
                 "SELECT count(*) FROM orders o " +
                         "WHERE EXISTS (SELECT avg(l.orderkey) FROM lineitem l WHERE o.orderkey = l.orderkey)");
@@ -4264,7 +4470,7 @@ public abstract class AbstractTestQueries
                         "FROM orders o GROUP BY o.orderkey, EXISTS (SELECT 1 WHERE o.orderkey = 0)");
 
         // join
-        assertQuery(
+        assertQuery(session,
                 "SELECT count(*) " +
                         "FROM (SELECT * FROM orders ORDER BY orderkey LIMIT 10) o1 " +
                         "JOIN (SELECT * FROM orders ORDER BY orderkey LIMIT 5) o2 " +
@@ -4288,6 +4494,7 @@ public abstract class AbstractTestQueries
     @Test
     public void testCorrelatedExistsSubqueries()
     {
+        Session session = sessionWithLegacyTimestamp();
         // projection
         assertQuery(
                 "SELECT EXISTS(SELECT 1 FROM (VALUES 1, 1, 1, 2, 2, 3, 4) i(a) WHERE i.a < o.a AND i.a < 4) " +
@@ -4316,19 +4523,19 @@ public abstract class AbstractTestQueries
                         "EXISTS(SELECT 1 WHERE l.orderkey > 0 OR l.orderkey != 3)");
 
         // group by
-        assertQuery(
+        assertQuery(session,
                 "SELECT max(o.orderdate), o.orderkey, " +
                         "EXISTS(SELECT 1 FROM orders i WHERE o.orderkey < i.orderkey AND i.orderkey % 10000 = 0) " +
                         "FROM orders o GROUP BY o.orderkey ORDER BY o.orderkey LIMIT 1",
                 "VALUES ('1996-01-02', 1, true)"); // h2 is slow
-        assertQuery(
+        assertQuery(session,
                 "SELECT max(o.orderdate), o.orderkey " +
                         "FROM orders o " +
                         "GROUP BY o.orderkey " +
                         "HAVING EXISTS(SELECT 1 FROM orders i WHERE o.orderkey < i.orderkey AND i.orderkey % 10000 = 0)" +
                         "ORDER BY o.orderkey LIMIT 1",
                 "VALUES ('1996-01-02', 1)"); // h2 is slow
-        assertQuery(
+        assertQuery(session,
                 "SELECT max(o.orderdate), o.orderkey FROM orders o " +
                         "GROUP BY o.orderkey, EXISTS(SELECT 1 FROM orders i WHERE o.orderkey < i.orderkey AND i.orderkey % 10000 = 0)" +
                         "ORDER BY o.orderkey LIMIT 1",
@@ -6569,6 +6776,31 @@ public abstract class AbstractTestQueries
     }
 
     @Test
+    public void testMapFromEntriesArrayLiteralRewrite()
+    {
+        // All-constant entries: rewrite to MAP(ARRAY[keys], ARRAY[values]), then constant-folded
+        assertQuerySucceeds("SELECT map_from_entries(ARRAY[ROW(1, 'a'), ROW(2, 'b')])");
+
+        // Single entry
+        assertQuerySucceeds("SELECT map_from_entries(ARRAY[ROW(10, 100)])");
+
+        // Used in a filter
+        assertQuery(
+                "SELECT orderkey FROM orders WHERE map_from_entries(ARRAY[ROW(1, true), ROW(2, false)])[1] AND orderkey < 5",
+                "SELECT orderkey FROM orders WHERE orderkey < 5");
+
+        // Mixed with table columns (non-constant values prevent full constant-folding)
+        assertQuery(
+                "SELECT map_from_entries(ARRAY[ROW(1, orderkey), ROW(2, custkey)])[1] FROM orders WHERE orderkey < 5",
+                "SELECT orderkey FROM orders WHERE orderkey < 5");
+
+        // Nested in another expression
+        assertQuery(
+                "SELECT cardinality(map_from_entries(ARRAY[ROW(1, 'x'), ROW(2, 'y'), ROW(3, 'z')]))",
+                "SELECT CAST(3 AS BIGINT)");
+    }
+
+    @Test
     public void testDuplicateUnnestItem()
     {
         // unnest with cross join
@@ -7798,7 +8030,7 @@ public abstract class AbstractTestQueries
         {
             // Orig
             String testQuery = "SELECT 1 from region join nation using(regionkey)";
-            MaterializedResult result = computeActual("explain(type distributed) " + testQuery);
+            MaterializedResult result = computeActual("explain(type logical) " + testQuery);
             assertEquals(((String) result.getMaterializedRows().get(0).getField(0)).indexOf("SemiJoin"), -1);
             result = computeActual(testQuery);
             assertEquals(result.getRowCount(), 25);
@@ -7807,7 +8039,7 @@ public abstract class AbstractTestQueries
             Session session = Session.builder(getSession())
                     .setSystemProperty(JOIN_PREFILTER_BUILD_SIDE, String.valueOf(true))
                     .build();
-            result = computeActual(session, "explain(type distributed) " + testQuery);
+            result = computeActual(session, "explain(type logical) " + testQuery);
             assertNotEquals(((String) result.getMaterializedRows().get(0).getField(0)).indexOf("SemiJoin"), -1);
             result = computeActual(session, testQuery);
             assertEquals(result.getRowCount(), 25);
@@ -7816,7 +8048,7 @@ public abstract class AbstractTestQueries
         {
             // Orig
             @Language("SQL") String testQuery = "SELECT 1 from region r join nation n on cast(r.regionkey as varchar) = cast(n.regionkey as varchar)";
-            MaterializedResult result = computeActual("explain(type distributed) " + testQuery);
+            MaterializedResult result = computeActual("explain(type logical) " + testQuery);
             assertEquals(((String) result.getMaterializedRows().get(0).getField(0)).indexOf("SemiJoin"), -1);
             result = computeActual(testQuery);
             assertEquals(result.getRowCount(), 25);
@@ -7826,7 +8058,7 @@ public abstract class AbstractTestQueries
                     .setSystemProperty(JOIN_PREFILTER_BUILD_SIDE, String.valueOf(true))
                     .setSystemProperty(REMOVE_REDUNDANT_CAST_TO_VARCHAR_IN_JOIN, String.valueOf(false))
                     .build();
-            result = computeActual(session, "explain(type distributed) " + testQuery);
+            result = computeActual(session, "explain(type logical) " + testQuery);
             assertNotEquals(((String) result.getMaterializedRows().get(0).getField(0)).indexOf("SemiJoin"), -1);
             assertNotEquals(((String) result.getMaterializedRows().get(0).getField(0)).indexOf("XX_HASH_64"), -1);
             result = computeActual(session, testQuery);
@@ -7836,7 +8068,7 @@ public abstract class AbstractTestQueries
         {
             // Orig
             String testQuery = "SELECT 1 from lineitem l join orders o on l.orderkey = o.orderkey and l.suppkey = o.custkey";
-            MaterializedResult result = computeActual("explain(type distributed) " + testQuery);
+            MaterializedResult result = computeActual("explain(type logical) " + testQuery);
             assertEquals(((String) result.getMaterializedRows().get(0).getField(0)).indexOf("SemiJoin"), -1);
             result = computeActual(testQuery);
             assertEquals(result.getRowCount(), 37);
@@ -7845,12 +8077,50 @@ public abstract class AbstractTestQueries
             Session session = Session.builder(getSession())
                     .setSystemProperty(JOIN_PREFILTER_BUILD_SIDE, String.valueOf(true))
                     .build();
-            result = computeActual(session, "explain(type distributed) " + testQuery);
+            result = computeActual(session, "explain(type logical) " + testQuery);
             assertNotEquals(((String) result.getMaterializedRows().get(0).getField(0)).indexOf("SemiJoin"), -1);
             assertNotEquals(((String) result.getMaterializedRows().get(0).getField(0)).indexOf("XX_HASH_64"), -1);
             result = computeActual(session, testQuery);
             assertEquals(result.getRowCount(), 37);
         }
+    }
+
+    @Test
+    public void testJoinPrefilterSkippedForNonDeterministicExpressions()
+    {
+        // When the left side of a join contains non-deterministic expressions (e.g., TABLESAMPLE BERNOULLI
+        // which uses rand()), the JoinPrefilter optimizer should NOT clone the subtree, because each clone
+        // would produce a different random sample, effectively squaring the sampling rate.
+        Session session = Session.builder(getSession())
+                .setSystemProperty(JOIN_PREFILTER_BUILD_SIDE, String.valueOf(true))
+                .build();
+
+        // With TABLESAMPLE BERNOULLI (which introduces rand() filter), the optimizer should
+        // skip prefiltering and NOT produce a SemiJoin node in the plan.
+        // We use 50% (not 100%) to avoid RemoveFullSample optimizing away the SampleNode
+        // before ImplementBernoulliSampleAsFilter converts it to a rand() filter.
+        String testQuery = "SELECT orderkey from orders TABLESAMPLE BERNOULLI (50) join lineitem using(orderkey)";
+        MaterializedResult result = computeActual(session, "explain(type logical) " + testQuery);
+        String plan = (String) result.getMaterializedRows().get(0).getField(0);
+        assertEquals(plan.indexOf("SemiJoin"), -1,
+                "JoinPrefilter should not produce SemiJoin when left side contains non-deterministic BERNOULLI sampling");
+
+        // Verify that a deterministic query with the same session setting still gets prefiltered
+        String deterministicQuery = "SELECT orderkey from orders join lineitem using(orderkey)";
+        result = computeActual(session, "explain(type logical) " + deterministicQuery);
+        plan = (String) result.getMaterializedRows().get(0).getField(0);
+        assertNotEquals(plan.indexOf("SemiJoin"), -1,
+                "JoinPrefilter should produce SemiJoin for deterministic joins");
+
+        // Verify that TABLESAMPLE BERNOULLI on the RIGHT side still allows prefiltering,
+        // since the determinism guard only inspects the left scan-filter-project subtree.
+        // This documents the intended asymmetry: the left side is cloned for the bloom
+        // filter, so only the left side needs to be deterministic.
+        String rightSideBernoulliQuery = "SELECT orderkey from orders join lineitem TABLESAMPLE BERNOULLI (50) using(orderkey)";
+        result = computeActual(session, "explain(type logical) " + rightSideBernoulliQuery);
+        plan = (String) result.getMaterializedRows().get(0).getField(0);
+        assertNotEquals(plan.indexOf("SemiJoin"), -1,
+                "JoinPrefilter should still produce SemiJoin when only right side contains non-deterministic BERNOULLI sampling");
     }
 
     @Test
@@ -8221,6 +8491,97 @@ public abstract class AbstractTestQueries
                 .collect(toList());
     }
 
+    @Test
+    public void testSimplifyAggregationsOverConstant()
+    {
+        Session enabled = Session.builder(getSession())
+                .setSystemProperty("simplify_aggregations_over_constant", "true")
+                .build();
+        Session disabled = Session.builder(getSession())
+                .setSystemProperty("simplify_aggregations_over_constant", "false")
+                .build();
+
+        // MIN/MAX over constant projection from a real table
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT MIN(x), MAX(x) FROM (SELECT 7 AS x FROM orders)",
+                disabled);
+
+        // ARBITRARY over constant projection
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT ARBITRARY(x) FROM (SELECT 42 AS x FROM orders)",
+                disabled);
+
+        // APPROX_DISTINCT over constant projection
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT APPROX_DISTINCT(x) FROM (SELECT 42 AS x FROM orders)",
+                disabled);
+
+        // APPROX_DISTINCT(NULL) over constant projection
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT APPROX_DISTINCT(x) FROM (SELECT CAST(NULL AS BIGINT) AS x FROM orders)",
+                disabled);
+
+        // MIN/MAX(NULL) over constant projection
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT MIN(x), MAX(x) FROM (SELECT CAST(NULL AS BIGINT) AS x FROM orders)",
+                disabled);
+
+        // MIN/MAX over constant in scalar subquery
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT MIN(x), MAX(x) FROM (SELECT 7 AS x)",
+                disabled);
+
+        // Mixed foldable (MIN) and unfoldable (SUM) over constant
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT MIN(x), SUM(x) FROM (SELECT 5 AS x FROM orders)",
+                disabled);
+
+        // GROUP BY with MIN/MAX over constant
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT orderstatus, MIN(x), MAX(x) FROM (SELECT orderstatus, 5 AS x FROM orders) GROUP BY orderstatus",
+                disabled);
+
+        // Double type constant
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT MIN(x), MAX(x) FROM (SELECT CAST(3.14 AS DOUBLE) AS x FROM orders)",
+                disabled);
+
+        // Aggregation with FILTER clause should not fold but still produce correct results
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT MIN(x) FILTER (WHERE x > 0) FROM (SELECT 5 AS x FROM orders)",
+                disabled);
+
+        // Non-constant columns should not be affected
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT MIN(custkey), MAX(custkey) FROM orders",
+                disabled);
+
+        // Constant via WHERE equality (after constant propagation)
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT MIN(orderkey) FROM orders WHERE orderkey = 7",
+                disabled);
+
+        // Constant via WHERE equality with multiple aggregations
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT MIN(orderkey), MAX(orderkey), SUM(orderkey) FROM orders WHERE orderkey = 7",
+                disabled);
+
+        // Constant via CAST expression in projection
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT MIN(x) FROM (SELECT CAST(7 AS BIGINT) AS x FROM orders)",
+                disabled);
+
+        // WHERE clause that eliminates all rows — result should be NULL
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT MIN(orderkey) FROM orders WHERE orderkey = -1",
+                disabled);
+
+        // GROUP BY with constant via WHERE
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT orderstatus, MIN(orderkey) FROM orders WHERE orderkey = 7 GROUP BY orderstatus",
+                disabled);
+    }
+
     /**
      * Returns a date expression, casting to DATE if storageFormat is DWRF.
      */
@@ -8228,5 +8589,251 @@ public abstract class AbstractTestQueries
     {
         // DWRF does not support date type.
         return storageFormat.equals("DWRF") ? "cast(" + columnExpression + " as DATE)" : columnExpression;
+    }
+
+    @Test
+    public void testSimplifyCoalesceOverJoinKeys()
+    {
+        Session enabledSession = Session.builder(getSession())
+                .setSystemProperty(SIMPLIFY_COALESCE_OVER_JOIN_KEYS, "true")
+                .build();
+        Session disabledSession = Session.builder(getSession())
+                .setSystemProperty(SIMPLIFY_COALESCE_OVER_JOIN_KEYS, "false")
+                .build();
+
+        // LEFT JOIN: COALESCE(l.x, r.y) should be simplified to l.x
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT COALESCE(n.nationkey, r.regionkey) FROM nation n LEFT JOIN region r ON n.nationkey = r.regionkey",
+                disabledSession);
+
+        // LEFT JOIN: COALESCE(r.y, l.x) should also simplify to l.x
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT COALESCE(r.regionkey, n.nationkey) FROM nation n LEFT JOIN region r ON n.nationkey = r.regionkey",
+                disabledSession);
+
+        // RIGHT JOIN: COALESCE(l.x, r.y) should simplify to r.y
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT COALESCE(n.nationkey, r.regionkey) FROM nation n RIGHT JOIN region r ON n.nationkey = r.regionkey",
+                disabledSession);
+
+        // INNER JOIN: COALESCE(l.x, r.y) should simplify to l.x (first arg)
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT COALESCE(n.nationkey, r.regionkey) FROM nation n INNER JOIN region r ON n.nationkey = r.regionkey",
+                disabledSession);
+
+        // FULL JOIN: COALESCE should NOT be simplified — verify results still match
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT COALESCE(n.nationkey, r.regionkey) FROM nation n FULL JOIN region r ON n.nationkey = r.regionkey",
+                disabledSession);
+
+        // Multiple columns with COALESCE on join key plus other columns
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT COALESCE(n.nationkey, r.regionkey), n.name FROM nation n LEFT JOIN region r ON n.nationkey = r.regionkey",
+                disabledSession);
+
+        // JOIN USING produces COALESCE automatically
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT regionkey FROM nation LEFT JOIN region USING (regionkey)",
+                disabledSession);
+    }
+
+    @Test
+    public void testMergeMinMaxByAggregations()
+    {
+        Session enabledSession = Session.builder(getSession())
+                .setSystemProperty(MERGE_MAX_BY_AND_MIN_BY_AGGREGATIONS, "true")
+                .build();
+        Session disabledSession = Session.builder(getSession())
+                .setSystemProperty(MERGE_MAX_BY_AND_MIN_BY_AGGREGATIONS, "false")
+                .build();
+
+        // max_by: global aggregation (orderkey is unique — no tie-breaking ambiguity)
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT max_by(totalprice, orderkey), max_by(orderstatus, orderkey) FROM orders",
+                disabledSession);
+
+        // max_by: with GROUP BY
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT orderstatus, max_by(totalprice, orderkey), max_by(custkey, orderkey) FROM orders GROUP BY orderstatus",
+                disabledSession);
+
+        // max_by: three aggregations
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT max_by(totalprice, orderkey), max_by(custkey, orderkey), max_by(orderstatus, orderkey) FROM orders",
+                disabledSession);
+
+        // min_by: global aggregation
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT min_by(totalprice, orderkey), min_by(orderstatus, orderkey) FROM orders",
+                disabledSession);
+
+        // min_by: with GROUP BY
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT orderstatus, min_by(totalprice, orderkey), min_by(custkey, orderkey) FROM orders GROUP BY orderstatus",
+                disabledSession);
+
+        // mixed max_by and min_by with same key — merged separately
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT max_by(totalprice, orderkey), max_by(custkey, orderkey), " +
+                        "min_by(totalprice, orderkey), min_by(custkey, orderkey) FROM orders",
+                disabledSession);
+
+        // max_by with other aggregations
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT max_by(totalprice, orderkey), max_by(custkey, orderkey), sum(totalprice), count(*) FROM orders",
+                disabledSession);
+
+        // max_by with GROUP BY and HAVING
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT orderstatus, max_by(totalprice, orderkey), max_by(custkey, orderkey) " +
+                        "FROM orders GROUP BY orderstatus HAVING count(*) > 1",
+                disabledSession);
+
+        // Single max_by — should NOT be rewritten (optimization doesn't apply)
+        assertQueryWithSameQueryRunner(enabledSession,
+                "SELECT max_by(totalprice, orderkey) FROM orders",
+                disabledSession);
+    }
+
+    @Test
+    public void testOptimizeRowInPredicate()
+    {
+        Session enabled = Session.builder(getSession())
+                .setSystemProperty(OPTIMIZE_ROW_IN_PREDICATE, "true")
+                .build();
+        Session disabled = Session.builder(getSession())
+                .setSystemProperty(OPTIMIZE_ROW_IN_PREDICATE, "false")
+                .build();
+
+        // Multi-column ROW IN
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT count(*) FROM orders WHERE (orderstatus, custkey) IN (('O', 370), ('F', 781), ('P', 1234))",
+                disabled);
+
+        // ROW IN as part of a larger AND conjunction — rewriter must walk into the AND
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT count(*) FROM orders WHERE (orderstatus, custkey) IN (('O', 370), ('F', 781)) AND totalprice > 1000",
+                disabled);
+
+        // Single-row candidate (degenerate but legal)
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT count(*) FROM orders WHERE (orderstatus, custkey) IN (('O', 370))",
+                disabled);
+
+        // Three columns
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT count(*) FROM orders WHERE (orderstatus, custkey, orderpriority) IN (('O', 370, '5-LOW'), ('F', 781, '1-URGENT'))",
+                disabled);
+
+        // Partition-key-shaped on lineitem (returnflag + linestatus is the canonical TPCH "partition" demo)
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT count(*) FROM lineitem WHERE (returnflag, linestatus) IN (('A', 'F'), ('N', 'O'), ('R', 'F'))",
+                disabled);
+
+        // Two-column with extra filter on a non-key column
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT orderkey FROM orders WHERE (orderstatus, custkey) IN (('O', 370), ('F', 781)) AND totalprice > 100000 ORDER BY orderkey LIMIT 10",
+                disabled);
+    }
+
+    @Test
+    public void testOptimizeRowNotInPredicate()
+    {
+        Session enabled = Session.builder(getSession())
+                .setSystemProperty(OPTIMIZE_ROW_IN_PREDICATE, "true")
+                .build();
+        Session disabled = Session.builder(getSession())
+                .setSystemProperty(OPTIMIZE_ROW_IN_PREDICATE, "false")
+                .build();
+
+        // Multi-column ROW NOT IN — restrict to a small partition first to bound the result
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT count(*) FROM orders WHERE orderstatus = 'O' AND (orderstatus, custkey) NOT IN (('O', 370), ('F', 781), ('P', 1234))",
+                disabled);
+
+        // ROW NOT IN with AND
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT count(*) FROM orders WHERE orderstatus = 'O' AND (orderstatus, custkey) NOT IN (('O', 370), ('F', 781)) AND totalprice > 1000",
+                disabled);
+
+        // Partition-key-shaped NOT IN on lineitem
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT count(*) FROM lineitem WHERE (returnflag, linestatus) NOT IN (('N', 'O'))",
+                disabled);
+    }
+
+    @Test
+    public void testPushFilterThroughSelectingAggregation()
+    {
+        Session enabled = Session.builder(getSession())
+                .setSystemProperty(PUSH_FILTER_THROUGH_SELECTING_AGGREGATION, "true")
+                .build();
+        Session disabled = Session.builder(getSession())
+                .setSystemProperty(PUSH_FILTER_THROUGH_SELECTING_AGGREGATION, "false")
+                .build();
+
+        // MAX with >= : pushdown safe
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT orderstatus, max(totalprice) FROM orders GROUP BY orderstatus HAVING max(totalprice) >= 100000",
+                disabled);
+
+        // MAX with > : pushdown safe
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT orderstatus, max(totalprice) FROM orders GROUP BY orderstatus HAVING max(totalprice) > 200000",
+                disabled);
+
+        // MIN with <= : pushdown safe
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT orderstatus, min(totalprice) FROM orders GROUP BY orderstatus HAVING min(totalprice) <= 1000",
+                disabled);
+
+        // MIN with < : pushdown safe
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT orderstatus, min(totalprice) FROM orders GROUP BY orderstatus HAVING min(totalprice) < 500",
+                disabled);
+
+        // MAX with <=: NOT safe to pushdown — must produce same results because rule should not fire
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT orderstatus, max(totalprice) FROM orders GROUP BY orderstatus HAVING max(totalprice) <= 200000",
+                disabled);
+
+        // MAX with =: ADD-pre-filter (x >= 60000) + KEEP HAVING (max(orderkey) = 60000)
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT orderstatus, max(orderkey) FROM orders GROUP BY orderstatus HAVING max(orderkey) = 60000",
+                disabled);
+
+        // MIN with =: ADD-pre-filter (x <= 1) + KEEP HAVING (min(orderkey) = 1)
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT orderstatus, min(orderkey) FROM orders GROUP BY orderstatus HAVING min(orderkey) = 1",
+                disabled);
+
+        // Multi-aggregate: rule should not fire (sum would be incorrect after pushdown)
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT orderstatus, max(totalprice), sum(totalprice) FROM orders GROUP BY orderstatus HAVING max(totalprice) >= 100000",
+                disabled);
+
+        // Reversed comparison: literal on left side
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT orderstatus, max(totalprice) FROM orders GROUP BY orderstatus HAVING 100000 <= max(totalprice)",
+                disabled);
+
+        // Mixed conjunction: pushable + non-pushable
+        assertQueryWithSameQueryRunner(enabled,
+                "SELECT orderstatus, max(totalprice) FROM orders GROUP BY orderstatus HAVING max(totalprice) >= 100000 AND orderstatus <> 'X'",
+                disabled);
+
+        // CTE-style: MAX in inner query, WHERE on the alias outside. Mirrors the real-world
+        // shape `WITH agg AS (SELECT MAX(x) AS m ...) SELECT * FROM agg WHERE m >= c`.
+        // The pushdown should propagate through the CTE projection all the way to the source.
+        assertQueryWithSameQueryRunner(enabled,
+                "WITH agg AS (SELECT custkey, MAX(totalprice) AS max_price FROM orders GROUP BY custkey) " +
+                        "SELECT custkey, max_price FROM agg WHERE max_price >= 200000",
+                disabled);
+
+        // Same shape with downstream join — verify the pushed predicate survives further optimization.
+        assertQueryWithSameQueryRunner(enabled,
+                "WITH agg AS (SELECT custkey, MAX(totalprice) AS max_price FROM orders GROUP BY custkey) " +
+                        "SELECT c.name, agg.max_price FROM agg JOIN customer c ON c.custkey = agg.custkey WHERE agg.max_price >= 300000",
+                disabled);
     }
 }

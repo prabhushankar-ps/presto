@@ -65,6 +65,7 @@ import com.facebook.presto.execution.LocationFactory;
 import com.facebook.presto.execution.MemoryRevokingScheduler;
 import com.facebook.presto.execution.NodeTaskMap;
 import com.facebook.presto.execution.QueryManagerConfig;
+import com.facebook.presto.execution.QueryStateTransitionMonitor;
 import com.facebook.presto.execution.SqlTaskManager;
 import com.facebook.presto.execution.StageInfo;
 import com.facebook.presto.execution.TaskInfo;
@@ -147,6 +148,7 @@ import com.facebook.presto.resourcemanager.ClusterMemoryManagerService;
 import com.facebook.presto.resourcemanager.ClusterQueryTrackerService;
 import com.facebook.presto.resourcemanager.ClusterStatusSender;
 import com.facebook.presto.resourcemanager.ForResourceManager;
+import com.facebook.presto.resourcemanager.HttpResourceManagerClient;
 import com.facebook.presto.resourcemanager.NoopResourceGroupService;
 import com.facebook.presto.resourcemanager.RaftConfig;
 import com.facebook.presto.resourcemanager.RandomResourceManagerAddressSelector;
@@ -237,6 +239,8 @@ import com.facebook.presto.sql.planner.LocalExecutionPlanner;
 import com.facebook.presto.sql.planner.NodePartitioningManager;
 import com.facebook.presto.sql.planner.PartitioningProviderManager;
 import com.facebook.presto.sql.planner.PlanFragment;
+import com.facebook.presto.sql.planner.optimizations.DefaultRpcExecutionPolicy;
+import com.facebook.presto.sql.planner.optimizations.RpcExecutionPolicy;
 import com.facebook.presto.sql.planner.plan.JsonCodecSimplePlanFragmentSerde;
 import com.facebook.presto.sql.planner.sanity.PlanChecker;
 import com.facebook.presto.sql.planner.sanity.PlanCheckerProviderManager;
@@ -255,6 +259,7 @@ import com.facebook.presto.util.GcStatusMonitor;
 import com.facebook.presto.version.EmbedVersion;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.inject.Binder;
 import com.google.inject.Inject;
@@ -265,7 +270,9 @@ import com.google.inject.Scopes;
 import com.google.inject.TypeLiteral;
 import com.google.inject.multibindings.MapBinder;
 import io.airlift.slice.Slice;
+import io.netty.buffer.PooledByteBufAllocator;
 import jakarta.annotation.PreDestroy;
+import jakarta.inject.Named;
 import jakarta.inject.Singleton;
 import jakarta.servlet.Filter;
 import jakarta.servlet.Servlet;
@@ -273,10 +280,12 @@ import jakarta.servlet.Servlet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.function.Supplier;
 
 import static com.facebook.airlift.concurrent.ConcurrentScheduledExecutor.createConcurrentScheduledExecutor;
 import static com.facebook.airlift.concurrent.Threads.daemonThreadsNamed;
@@ -369,6 +378,10 @@ public class ServerMainModule
         binder.bind(BuiltInQueryAnalyzer.class).in(Scopes.SINGLETON);
         binder.bind(BuiltInAnalyzerProvider.class).in(Scopes.SINGLETON);
         binder.bind(AnalyzerProviderManager.class).in(Scopes.SINGLETON);
+
+        // RPC execution policy: the OSS default carries no batching heuristic (AUTOMATIC ->
+        // PER_ROW); a deployment may bind an override to enable stats-driven resolution.
+        newOptionalBinder(binder, RpcExecutionPolicy.class).setDefault().to(DefaultRpcExecutionPolicy.class).in(Scopes.SINGLETON);
 
         jaxrsBinder(binder).bind(ThrowableMapper.class);
 
@@ -474,7 +487,7 @@ public class ServerMainModule
 
         binder.bind(RandomResourceManagerAddressSelector.class).in(Scopes.SINGLETON);
         driftClientBinder(binder)
-                .bindDriftClient(ResourceManagerClient.class, ForResourceManager.class)
+                .bindDriftClient(com.facebook.presto.resourcemanager.thrift.ResourceManagerClient.class, ForResourceManager.class)
                 .withAddressSelector((addressSelectorBinder, annotation, prefix) ->
                         addressSelectorBinder.bind(AddressSelector.class).annotatedWith(annotation).to(RandomResourceManagerAddressSelector.class))
                 .withExceptionClassifier(throwable -> {
@@ -500,12 +513,14 @@ public class ServerMainModule
                     @Override
                     public void configure(Binder moduleBinder)
                     {
+                        binder.bind(ResourceManagerClient.class).to(HttpResourceManagerClient.class).in(Scopes.SINGLETON);
                         configBinder(moduleBinder).bindConfig(ResourceManagerConfig.class);
-                        // HTTP endpoint for some of ResourceManagerServer methods.
                         ResourceManagerConfig resourceManagerConfig = buildConfigObject(ResourceManagerConfig.class);
-                        if (resourceManagerConfig.getHeartbeatHttpEnabled()) {
-                            jaxrsBinder(moduleBinder).bind(ResourceManagerHeartbeatResource.class);
+
+                        if (serverConfig.isResourceManager() && resourceManagerConfig.getHttpServerEnabled()) {
+                            jaxrsBinder(moduleBinder).bind(ResourceManagerResource.class);
                         }
+
                         moduleBinder.bind(ClusterStatusSender.class).to(ResourceManagerClusterStatusSender.class).in(Scopes.SINGLETON);
                         if (serverConfig.isCoordinator()) {
                             moduleBinder.bind(ClusterMemoryManagerService.class).in(Scopes.SINGLETON);
@@ -628,7 +643,7 @@ public class ServerMainModule
                     config.setMaxContentLength(new DataSize(32, MEGABYTE));
                 });
 
-        binder.install(new DriftNettyClientModule());
+        binder.install(new DriftNettyClientModule(PooledByteBufAllocator.DEFAULT));
         driftClientBinder(binder).bindDriftClient(ThriftTaskClient.class, ForExchange.class)
                 .withAddressSelector(((addressSelectorBinder, annotation, prefix) ->
                         addressSelectorBinder.bind(AddressSelector.class).annotatedWith(annotation).to(FixedAddressSelector.class)));
@@ -740,6 +755,10 @@ public class ServerMainModule
         // ClusterOverload policy module
         binder.install(new ClusterOverloadPolicyModule());
         newExporter(binder).export(ClusterResourceChecker.class).withGeneratedName();
+
+        // Query state transition monitoring
+        binder.bind(QueryStateTransitionMonitor.class).in(Scopes.SINGLETON);
+        newExporter(binder).export(QueryStateTransitionMonitor.class).withGeneratedName();
 
         // splits
         jsonCodecBinder(binder).bindJsonCodec(TaskUpdateRequest.class);
@@ -953,6 +972,19 @@ public class ServerMainModule
                 nodeManager,
                 config.getNativeSidecarRegistryToolNumRetries(),
                 config.getNativeSidecarRegistryToolRetryDelayMs());
+    }
+
+    @Provides
+    @Singleton
+    @Named("rpcFunctionNames")
+    public Supplier<Set<String>> provideRpcFunctionNames(
+            FeaturesConfig featuresConfig,
+            WorkerFunctionRegistryTool registryTool)
+    {
+        if (featuresConfig.isBuiltInSidecarFunctionsEnabled()) {
+            return registryTool::getRpcFunctionNames;
+        }
+        return ImmutableSet::of;
     }
 
     public static class ExecutorCleanup

@@ -17,14 +17,15 @@ import com.facebook.airlift.json.JsonCodec;
 import com.facebook.presto.common.predicate.TupleDomain;
 import com.facebook.presto.common.type.TypeManager;
 import com.facebook.presto.iceberg.CommitTaskData;
+import com.facebook.presto.iceberg.IcebergAbstractMetadata;
 import com.facebook.presto.iceberg.IcebergColumnHandle;
 import com.facebook.presto.iceberg.IcebergDistributedProcedureHandle;
-import com.facebook.presto.iceberg.IcebergProcedureContext;
 import com.facebook.presto.iceberg.IcebergTableHandle;
 import com.facebook.presto.iceberg.IcebergTableLayoutHandle;
 import com.facebook.presto.iceberg.PartitionData;
 import com.facebook.presto.iceberg.RuntimeStatsMetricsReporter;
 import com.facebook.presto.iceberg.SortField;
+import com.facebook.presto.iceberg.procedure.context.IcebergRewriteDataFilesProcedureContext;
 import com.facebook.presto.spi.ConnectorDistributedProcedureHandle;
 import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.PrestoException;
@@ -47,9 +48,7 @@ import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableScan;
-import org.apache.iceberg.Transaction;
 import org.apache.iceberg.io.CloseableIterable;
-import org.apache.iceberg.io.CloseableIterator;
 import org.apache.iceberg.types.Type;
 
 import javax.inject.Inject;
@@ -60,24 +59,33 @@ import java.io.UncheckedIOException;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
-import java.util.function.Consumer;
 
 import static com.facebook.presto.common.Utils.checkArgument;
 import static com.facebook.presto.common.type.StandardTypes.VARCHAR;
 import static com.facebook.presto.iceberg.ExpressionConverter.toIcebergExpression;
 import static com.facebook.presto.iceberg.IcebergAbstractMetadata.getSupportedSortFields;
+import static com.facebook.presto.iceberg.IcebergMetadataColumn.Z_ORDER;
 import static com.facebook.presto.iceberg.IcebergSessionProperties.getCompressionCodec;
+import static com.facebook.presto.iceberg.IcebergUtil.filterByFile;
+import static com.facebook.presto.iceberg.IcebergUtil.filterByGroup;
 import static com.facebook.presto.iceberg.IcebergUtil.getColumns;
 import static com.facebook.presto.iceberg.IcebergUtil.getFileFormat;
+import static com.facebook.presto.iceberg.IcebergUtil.parseMaxFileSize;
+import static com.facebook.presto.iceberg.IcebergUtil.parseMinFileSize;
+import static com.facebook.presto.iceberg.IcebergUtil.parseMinInputFiles;
+import static com.facebook.presto.iceberg.IcebergUtil.parseRewriteAll;
 import static com.facebook.presto.iceberg.PartitionSpecConverter.toPrestoPartitionSpec;
 import static com.facebook.presto.iceberg.SchemaConverter.toPrestoSchema;
 import static com.facebook.presto.iceberg.SortFieldUtils.parseSortFields;
-import static com.facebook.presto.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
 import static com.facebook.presto.spi.procedure.TableDataRewriteDistributedProcedure.SCHEMA;
 import static com.facebook.presto.spi.procedure.TableDataRewriteDistributedProcedure.TABLE_NAME;
+import static com.facebook.presto.spi.procedure.TableDataRewriteDistributedProcedure.extractSortFieldStrings;
+import static com.facebook.presto.spi.procedure.TableDataRewriteDistributedProcedure.extractZOrderColumns;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -109,39 +117,70 @@ public class RewriteDataFilesProcedure
                         new Argument("filter", VARCHAR, false, "TRUE"),
                         new Argument("sorted_by", "array(varchar)", false, null),
                         new Argument("options", "map(varchar, varchar)", false, null)),
-                (session, procedureContext, tableLayoutHandle, arguments, sortOrderIndex) -> beginCallDistributedProcedure(session, (IcebergProcedureContext) procedureContext, (IcebergTableLayoutHandle) tableLayoutHandle, arguments, sortOrderIndex),
-                ((session, procedureContext, tableHandle, fragments) -> finishCallDistributedProcedure(session, (IcebergProcedureContext) procedureContext, tableHandle, fragments)),
+                (session, procedureContext, tableLayoutHandle, arguments, sortOrderIndex) -> beginCallDistributedProcedure(session, (IcebergRewriteDataFilesProcedureContext) procedureContext, (IcebergTableLayoutHandle) tableLayoutHandle, arguments, sortOrderIndex),
+                ((session, procedureContext, tableHandle, fragments) -> finishCallDistributedProcedure(session, (IcebergRewriteDataFilesProcedureContext) procedureContext, tableHandle, fragments)),
                 arguments -> {
-                    checkArgument(arguments.length == 2, format("invalid number of arguments: %s (should have %s)", arguments.length, 2));
-                    checkArgument(arguments[0] instanceof Table && arguments[1] instanceof Transaction, "Invalid arguments, required: [Table, Transaction]");
-                    return new IcebergProcedureContext((Table) arguments[0], (Transaction) arguments[1]);
+                    // Context provider receives [Table, Transaction, procedureArguments]
+                    checkArgument(arguments.length >= 2, format("invalid number of arguments: %s (should have at least %s)", arguments.length, 2));
+                    checkArgument(arguments[0] instanceof Table && arguments[1] instanceof IcebergAbstractMetadata, "Invalid arguments, required: [Table, IcebergAbstractMetadata]");
+
+                    // Extract and validate options from procedure arguments if present
+                    Map<String, String> options = extractAndValidateOptions(arguments);
+
+                    return new IcebergRewriteDataFilesProcedureContext((Table) arguments[0], (IcebergAbstractMetadata) arguments[1], options);
                 });
     }
 
-    private ConnectorDistributedProcedureHandle beginCallDistributedProcedure(ConnectorSession session, IcebergProcedureContext procedureContext, IcebergTableLayoutHandle layoutHandle, Object[] arguments, OptionalInt sortOrderIndex)
+    private static Map<String, String> extractAndValidateOptions(Object[] contextProviderArgs)
     {
+        Map<String, String> options = ImmutableMap.of();
+        if (contextProviderArgs.length > 2 && contextProviderArgs[2] instanceof Object[]) {
+            Object[] procedureArgs = (Object[]) contextProviderArgs[2];
+            // Options is the 5th procedure parameter (index 4)
+            if (procedureArgs.length > 4 && procedureArgs[4] != null && procedureArgs[4] instanceof Map) {
+                options = (Map<String, String>) procedureArgs[4];
+
+                // Validate options if present using utility methods
+                parseMinInputFiles(options);
+                parseMinFileSize(options);
+                parseMaxFileSize(options);
+                parseRewriteAll(options);
+            }
+        }
+        return options;
+    }
+
+    private ConnectorDistributedProcedureHandle beginCallDistributedProcedure(ConnectorSession session, IcebergRewriteDataFilesProcedureContext procedureContext, IcebergTableLayoutHandle layoutHandle, Object[] arguments, OptionalInt sortOrderIndex)
+    {
+        if (layoutHandle.isPushdownFilterEnabled()) {
+            throw new PrestoException(NOT_SUPPORTED,
+                    "Cannot execute rewrite_data_files when native-only filter push down is enabled.");
+        }
+
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(getClass().getClassLoader())) {
             Table icebergTable = procedureContext.getTable();
             IcebergTableHandle tableHandle = layoutHandle.getTable();
 
             SortOrder sortOrder = icebergTable.sortOrder();
-            List<String> sortFieldStrings = ImmutableList.of();
-            if (sortOrderIndex.isPresent()) {
-                Object value = arguments[sortOrderIndex.getAsInt()];
-                if (value == null) {
-                    sortFieldStrings = ImmutableList.of();
+            Optional<List<String>> zOrderColumns = Optional.empty();
+            List<String> sortFieldStrings = extractSortFieldStrings(arguments, sortOrderIndex);
+            if (!sortFieldStrings.isEmpty()) {
+                zOrderColumns = extractZOrderColumns(sortFieldStrings);
+
+                // Validate that zorder is not mixed with regular column names
+                boolean hasZOrder = zOrderColumns.isPresent();
+                List<String> nonZOrderFields = sortFieldStrings.stream()
+                        .filter(str -> !str.startsWith("zorder"))
+                        .collect(toImmutableList());
+                boolean hasRegularColumns = !nonZOrderFields.isEmpty();
+
+                if (hasZOrder && hasRegularColumns) {
+                    throw new PrestoException(NOT_SUPPORTED,
+                            "Cannot mix zorder function with regular column names in sorted_by. " +
+                            "Use either zorder function alone or regular column names, but not both.");
                 }
-                else if (value instanceof List<?>) {
-                    sortFieldStrings = ((List<?>) value).stream()
-                            .map(String.class::cast)
-                            .collect(toImmutableList());
-                }
-                else {
-                    throw new PrestoException(INVALID_FUNCTION_ARGUMENT, "sorted_by must be an array(varchar)");
-                }
-            }
-            if (sortFieldStrings != null && !sortFieldStrings.isEmpty()) {
-                SortOrder specifiedSortOrder = parseSortFields(icebergTable.schema(), sortFieldStrings);
+
+                SortOrder specifiedSortOrder = parseSortFields(icebergTable.schema(), nonZOrderFields);
                 if (specifiedSortOrder.satisfies(sortOrder)) {
                     // If the specified sort order satisfies the target table's internal sort order, use the specified sort order
                     sortOrder = specifiedSortOrder;
@@ -152,6 +191,12 @@ public class RewriteDataFilesProcedure
             }
 
             List<SortField> sortFields = getSupportedSortFields(icebergTable.schema(), sortOrder);
+            if (zOrderColumns.isPresent()) {
+                sortFields = ImmutableList.<SortField>builder()
+                        .addAll(sortFields)
+                        .add(new SortField(Z_ORDER.getId(), com.facebook.presto.common.block.SortOrder.ASC_NULLS_LAST))
+                        .build();
+            }
             return new IcebergDistributedProcedureHandle(
                     tableHandle.getSchemaName(),
                     tableHandle.getIcebergTableName(),
@@ -168,11 +213,11 @@ public class RewriteDataFilesProcedure
         }
     }
 
-    private void finishCallDistributedProcedure(ConnectorSession session, IcebergProcedureContext procedureContext, ConnectorDistributedProcedureHandle procedureHandle, Collection<Slice> fragments)
+    private void finishCallDistributedProcedure(ConnectorSession session, IcebergRewriteDataFilesProcedureContext procedureContext, ConnectorDistributedProcedureHandle procedureHandle, Collection<Slice> fragments)
     {
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(getClass().getClassLoader())) {
             IcebergDistributedProcedureHandle handle = (IcebergDistributedProcedureHandle) procedureHandle;
-            Table icebergTable = procedureContext.getTransaction().table();
+            Table icebergTable = procedureContext.getTable();
 
             List<CommitTaskData> commitTasks = fragments.stream()
                     .map(slice -> commitTaskCodec.fromJson(slice.getBytes()))
@@ -206,35 +251,30 @@ public class RewriteDataFilesProcedure
             if (tableHandle.getIcebergTableName().getSnapshotId().isPresent()) {
                 TupleDomain<IcebergColumnHandle> predicate = layoutHandle.getValidPredicate();
 
-                Consumer<FileScanTask> fileScanTaskConsumer = (task) -> {
-                    scannedDataFiles.add(task.file());
-                    if (!task.deletes().isEmpty()) {
-                        task.deletes().forEach(deleteFile -> {
-                            if (deleteFile.content() == FileContent.EQUALITY_DELETES &&
-                                    !icebergTable.specs().get(deleteFile.specId()).isPartitioned() &&
-                                    !predicate.isAll()) {
-                                // Equality files with an unpartitioned spec are applied as global deletes
-                                //  So they should not be cleaned up unless the whole table is optimized
-                                return;
-                            }
-                            fullyAppliedDeleteFiles.add(deleteFile);
-                        });
-                    }
-                };
-
                 TableScan tableScan = procedureContext.getTable().newScan()
                         .metricsReporter(new RuntimeStatsMetricsReporter(session.getRuntimeStats()))
                         .filter(toIcebergExpression(predicate))
                         .useSnapshot(tableHandle.getIcebergTableName().getSnapshotId().get());
-                CloseableIterable<FileScanTask> fileScanTaskIterable = tableScan.planFiles();
-                CloseableIterator<FileScanTask> fileScanTaskIterator = fileScanTaskIterable.iterator();
-                fileScanTaskIterator.forEachRemaining(fileScanTaskConsumer);
-                try {
-                    fileScanTaskIterable.close();
-                    fileScanTaskIterator.close();
-                    // TODO: remove this after org.apache.iceberg.io.CloseableIterator'withClose
-                    //  correct release resources holds by iterator.
-                    fileScanTaskIterator = CloseableIterator.empty();
+
+                Map<String, String> options = procedureContext.getOptions();
+                // Apply filtering using options
+                try (CloseableIterable<FileScanTask> fileScanTaskIterable = filterByGroup(filterByFile(tableScan.planFiles(), options), options)) {
+                    // Collect files and delete files from filtered tasks
+                    for (FileScanTask task : fileScanTaskIterable) {
+                        scannedDataFiles.add(task.file());
+                        if (!task.deletes().isEmpty()) {
+                            task.deletes().forEach(deleteFile -> {
+                                if (deleteFile.content() == FileContent.EQUALITY_DELETES &&
+                                        !icebergTable.specs().get(deleteFile.specId()).isPartitioned() &&
+                                        !predicate.isAll()) {
+                                    // Equality files with an unpartitioned spec are applied as global deletes
+                                    //  So they should not be cleaned up unless the whole table is optimized
+                                    return;
+                                }
+                                fullyAppliedDeleteFiles.add(deleteFile);
+                            });
+                        }
+                    }
                 }
                 catch (IOException e) {
                     throw new UncheckedIOException(e);
@@ -247,7 +287,7 @@ public class RewriteDataFilesProcedure
                 return;
             }
 
-            RewriteFiles rewriteFiles = procedureContext.getTransaction().newRewrite()
+            RewriteFiles rewriteFiles = icebergTable.newRewrite()
                     .rewriteFiles(scannedDataFiles, fullyAppliedDeleteFiles, newFiles, ImmutableSet.of());
 
             // Table.snapshot method returns null if there is no matching snapshot

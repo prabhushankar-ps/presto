@@ -28,6 +28,7 @@ import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ConnectorSession;
+import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.TableHandle;
 import com.facebook.presto.spi.VariableAllocator;
 import com.facebook.presto.spi.WarningCollector;
@@ -73,6 +74,7 @@ import com.facebook.presto.sql.planner.plan.ApplyNode;
 import com.facebook.presto.sql.planner.plan.CallDistributedProcedureNode;
 import com.facebook.presto.sql.planner.plan.ExplainAnalyzeNode;
 import com.facebook.presto.sql.planner.plan.GroupIdNode;
+import com.facebook.presto.sql.planner.plan.RPCNode;
 import com.facebook.presto.sql.planner.plan.RowNumberNode;
 import com.facebook.presto.sql.planner.plan.SimplePlanRewriter;
 import com.facebook.presto.sql.planner.plan.UpdateNode;
@@ -104,6 +106,7 @@ import static com.facebook.presto.common.Subfield.structureOnly;
 import static com.facebook.presto.common.type.TypeUtils.readNativeValue;
 import static com.facebook.presto.common.type.Varchars.isVarcharType;
 import static com.facebook.presto.metadata.BuiltInTypeAndFunctionNamespaceManager.JAVA_BUILTIN_NAMESPACE;
+import static com.facebook.presto.spi.StandardErrorCode.INVALID_ARGUMENTS;
 import static com.facebook.presto.spi.relation.SpecialFormExpression.Form.DEREFERENCE;
 import static com.facebook.presto.spi.relation.SpecialFormExpression.Form.IN;
 import static com.facebook.presto.spi.relation.SpecialFormExpression.Form.IS_NULL;
@@ -380,7 +383,9 @@ public class PushdownSubfields
 
                 List<Subfield> subfields = context.get().findSubfields(variable.getName());
 
-                verify(!subfields.isEmpty(), "Missing variable: " + variable);
+                if (subfields.isEmpty()) {
+                    throw new PrestoException(INVALID_ARGUMENTS, "Missing variable: " + variable);
+                }
 
                 String columnName = getColumnName(session, metadata, node.getTable(), entry.getValue());
 
@@ -434,7 +439,9 @@ public class PushdownSubfields
 
                 List<Subfield> subfields = context.get().findSubfields(variable.getName());
 
-                verify(!subfields.isEmpty(), "Missing variable: " + variable);
+                if (subfields.isEmpty()) {
+                    throw new PrestoException(INVALID_ARGUMENTS, "Missing variable: " + variable);
+                }
 
                 String columnName = getColumnName(session, metadata, node.getTableHandle(), entry.getValue());
 
@@ -525,6 +532,19 @@ public class PushdownSubfields
                 entry.getValue().forEach(variable -> context.get().addAssignment(entry.getKey(), variable));
             }
 
+            return context.defaultRewrite(node, context.get());
+        }
+
+        @Override
+        public PlanNode visitRPC(RPCNode node, RewriteContext<Context> context)
+        {
+            context.get().variables.add(node.getOutputVariable());
+            Set<String> argColumnNames = ImmutableSet.copyOf(node.getArgumentColumns());
+            for (VariableReferenceExpression var : node.getSource().getOutputVariables()) {
+                if (argColumnNames.contains(var.getName())) {
+                    context.get().variables.add(var);
+                }
+            }
             return context.defaultRewrite(node, context.get());
         }
 
@@ -1091,7 +1111,9 @@ public class PushdownSubfields
                 }
 
                 List<Subfield> matchingSubfields = findSubfields(variable.getName());
-                verify(!matchingSubfields.isEmpty(), "Missing variable: " + variable);
+                if (matchingSubfields.isEmpty()) {
+                    throw new PrestoException(INVALID_ARGUMENTS, "Missing variable: " + variable);
+                }
 
                 matchingSubfields.stream()
                         .map(Subfield::getPath)
@@ -1107,7 +1129,9 @@ public class PushdownSubfields
                 }
 
                 List<Subfield> matchingSubfields = findSubfields(variable.getName());
-                verify(!matchingSubfields.isEmpty(), "Missing variable: " + variable);
+                if (matchingSubfields.isEmpty()) {
+                    throw new PrestoException(INVALID_ARGUMENTS, "Missing variable: " + variable);
+                }
 
                 matchingSubfields.stream()
                         .map(Subfield::getPath)

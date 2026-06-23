@@ -323,6 +323,18 @@ class SystemConfig : public ConfigBase {
   static constexpr std::string_view kSpillerFileCreateConfig{
       "spiller.file-create-config"};
 
+  /// Config used to create aggregation spill files. This config is provided to
+  /// underlying file system and the config is free form. The form should be
+  /// defined by the underlying file system.
+  static constexpr std::string_view kSpillerAggregationFileCreateConfig{
+      "spiller.aggregation-file-create-config"};
+
+  /// Config used to create hash join spill files. This config is provided to
+  /// underlying file system and the config is free form. The form should be
+  /// defined by the underlying file system.
+  static constexpr std::string_view kSpillerHashJoinFileCreateConfig{
+      "spiller.hash-join-file-create-config"};
+
   /// Config used to create spill directories. This config is provided to
   /// underlying file system and the config is free form. The form should be
   /// defined by the underlying file system.
@@ -650,6 +662,59 @@ class SystemConfig : public ConfigBase {
   static constexpr std::string_view kLocalShuffleMaxPartitionBytes{
       "shuffle.local.max-partition-bytes"};
   static constexpr std::string_view kShuffleName{"shuffle.name"};
+
+  /// Enable materialized exchange I/O (MaterializedOutput/MaterializedExchange
+  /// operators). When false, falls back to PartitionAndSerialize +
+  /// LocalPartition + ShuffleWrite.
+  /// Default: false.
+  static constexpr std::string_view kExchangeMaterializationEnabled{
+      "exchange.materialization.enabled"};
+
+  /// MaterializedOutput flat buffer flush threshold in bytes. Controls how much
+  /// serialized CompactRow data accumulates per driver before flushing to
+  /// the MaterializedOutputBuffer. Default: 16MB.
+  static constexpr std::string_view
+      kExchangeMaterializationPartitioningRowBatchBufferSize{
+          "exchange.materialization.partitioning-row-batch-buffer-size"};
+
+  /// MaterializedOutputBuffer total size in bytes. Needed until reclaim is
+  /// implemented; acts as the backpressure cap for the output buffer.
+  /// The per-partition drain threshold is dynamically computed as
+  /// min(output-buffer.per-partition-max-bytes, output-buffer.max-bytes /
+  /// numPartitions). Default: 1GB.
+  static constexpr std::string_view
+      kExchangeMaterializationOutputBufferMaxBytes{
+          "exchange.materialization.output-buffer.max-bytes"};
+
+  /// MaterializedOutputBuffer per-partition drain threshold in bytes. When a
+  /// partition accumulates this much data, it is drained to the writer.
+  /// Default: 130KB.
+  static constexpr std::string_view
+      kExchangeMaterializationOutputBufferPerPartitionMaxBytes{
+          "exchange.materialization.output-buffer.per-partition-max-bytes"};
+
+  /// Fraction of the per-partition drain threshold used during memory reclaim.
+  /// The reclaim drain threshold is generally lower than the regular drain
+  /// threshold, but high enough that draining actually reduces memory. Without
+  /// this lower bound, reclaim would flush small partition buffers that don't
+  /// produce compressible packages — low ROI flushes that move data to the
+  /// writer without freeing meaningful memory.
+  /// Default: 0.67.
+  static constexpr std::string_view
+      kExchangeMaterializationReclaimDrainThresholdRatio{
+          "exchange.materialization.reclaim-drain-threshold-ratio"};
+
+  /// Wait for the writer to drain after flushing partition buffers during
+  /// reclaim. Default: false.
+  static constexpr std::string_view
+      kExchangeMaterializationReclaimWaitForWriterDrainEnabled{
+          "exchange.materialization.reclaim-wait-for-writer-drain-enabled"};
+
+  /// Use high reclaim priority (-1) for the output buffer pool.
+  /// Default: false (uses default priority 0).
+  static constexpr std::string_view kExchangeMaterializationReclaimHighPriority{
+      "exchange.materialization.reclaim-high-priority"};
+
   static constexpr std::string_view kHttpEnableAccessLog{
       "http-server.enable-access-log"};
   static constexpr std::string_view kHttpEnableStatsFilter{
@@ -851,6 +916,12 @@ class SystemConfig : public ConfigBase {
       "order-by-spill-enabled"};
   static constexpr std::string_view kMaxSpillBytes{"max-spill-bytes"};
 
+  /// Input stream buffer size in bytes for reading broadcast files. Controls
+  /// per-source memory footprint when many broadcast sources are active.
+  /// Default: 1MB.
+  static constexpr std::string_view kBroadcastExchangeSourceReadBufferBytes{
+      "broadcast-exchange-source-read-buffer-bytes"};
+
   /// When enabled, hash tables built for broadcast joins are cached and reused
   /// across tasks within the same query and stage.
   static constexpr std::string_view kBroadcastJoinTableCachingEnabled{
@@ -1029,6 +1100,10 @@ class SystemConfig : public ConfigBase {
 
   std::string spillerFileCreateConfig() const;
 
+  std::string spillerAggregationFileCreateConfig() const;
+
+  std::string spillerHashJoinFileCreateConfig() const;
+
   std::string spillerDirectoryCreateConfig() const;
 
   folly::Optional<std::string> spillerSpillPath() const;
@@ -1098,6 +1173,20 @@ class SystemConfig : public ConfigBase {
   uint64_t ssdCacheMaxEntries() const;
 
   std::string shuffleName() const;
+
+  bool exchangeMaterializationEnabled() const;
+
+  int64_t exchangeMaterializationPartitioningRowBatchBufferSize() const;
+
+  int64_t exchangeMaterializationOutputBufferMaxBytes() const;
+
+  int64_t exchangeMaterializationOutputBufferPerPartitionMaxBytes() const;
+
+  double exchangeMaterializationReclaimDrainThresholdRatio() const;
+
+  bool exchangeMaterializationReclaimWaitForWriterDrainEnabled() const;
+
+  bool exchangeMaterializationReclaimHighPriority() const;
 
   bool enableSerializedPageChecksum() const;
 
@@ -1238,6 +1327,8 @@ class SystemConfig : public ConfigBase {
   bool aggregationSpillEnabled() const;
 
   bool orderBySpillEnabled() const;
+
+  uint64_t broadcastExchangeSourceReadBufferBytes() const;
 
   bool broadcastJoinTableCachingEnabled() const;
 

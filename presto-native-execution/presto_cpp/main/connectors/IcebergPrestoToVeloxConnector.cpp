@@ -15,14 +15,27 @@
 #include "presto_cpp/main/connectors/IcebergPrestoToVeloxConnector.h"
 #include "presto_cpp/main/connectors/PrestoToVeloxConnectorUtils.h"
 
+#include <algorithm>
+#include <unordered_set>
+
 #include "presto_cpp/presto_protocol/connector/iceberg/IcebergConnectorProtocol.h"
 #include "velox/connectors/hive/iceberg/IcebergDataSink.h"
+#include "velox/connectors/hive/iceberg/IcebergMetadataColumns.h"
 #include "velox/connectors/hive/iceberg/IcebergSplit.h"
 #include "velox/type/fbhive/HiveTypeParser.h"
 
 namespace facebook::presto {
 
 namespace {
+
+// Row-lineage columns are not included in a table's dataColumns but may exist
+// physically in written files. Centralizing the names here means adding a new
+// lineage column only requires updating this one set.
+const std::unordered_set<std::string> kRowLineageColumnNames = {
+    velox::connector::hive::iceberg::IcebergMetadataColumn::kRowIdColumnName,
+    velox::connector::hive::iceberg::IcebergMetadataColumn::
+        kLastUpdatedSequenceNumberColumnName,
+};
 
 velox::connector::hive::iceberg::FileContent toVeloxFileContent(
     const presto::protocol::iceberg::FileContent content) {
@@ -47,7 +60,6 @@ velox::dwio::common::FileFormat toVeloxFileFormat(
 std::unique_ptr<velox::connector::ConnectorTableHandle> toIcebergTableHandle(
     const protocol::TupleDomain<protocol::Subfield>& domainPredicate,
     const std::shared_ptr<protocol::RowExpression>& remainingPredicate,
-    bool isPushdownFilterEnabled,
     const std::string& tableName,
     const protocol::List<protocol::Column>& dataColumns,
     const protocol::TableHandle& tableHandle,
@@ -94,13 +106,26 @@ std::unique_ptr<velox::connector::ConnectorTableHandle> toIcebergTableHandle(
       types.push_back(VELOX_DYNAMIC_TYPE_DISPATCH(
           fieldNamesToLowerCase, parsedType->kind(), parsedType));
     }
+
+    // Row-lineage columns are not included in the table's dataColumns but may
+    // exist physically in the written files (e.g. after MERGE/UPDATE). Add any
+    // requested lineage columns to finalDataColumns so the reader can match
+    // them with the Parquet schema.
+    for (const auto& handle : columnHandles) {
+      if (kRowLineageColumnNames.count(handle->name()) &&
+          std::find(names.begin(), names.end(), handle->name()) ==
+              names.end()) {
+        names.emplace_back(handle->name());
+        types.push_back(handle->dataType());
+      }
+    }
+
     finalDataColumns = ROW(std::move(names), std::move(types));
   }
 
   return std::make_unique<velox::connector::hive::HiveTableHandle>(
       tableHandle.connectorId,
       tableName,
-      isPushdownFilterEnabled,
       std::move(subfieldFilters),
       remainingFilter,
       finalDataColumns,
@@ -213,9 +238,15 @@ IcebergPrestoToVeloxConnector::toVeloxSplit(
   }
 
   std::unordered_map<std::string, std::string> infoColumns = {
-      {"$data_sequence_number",
-       std::to_string(icebergSplit->dataSequenceNumber)},
-      {"$path", icebergSplit->path}};
+      {"$path", icebergSplit->path},
+      {velox::connector::hive::iceberg::IcebergMetadataColumn::
+           kDataSequenceNumberInfoColumn,
+       std::to_string(icebergSplit->dataSequenceNumber)}};
+  if (icebergSplit->firstRowId >= 0) {
+    infoColumns[velox::connector::hive::iceberg::IcebergMetadataColumn::
+                    kFirstRowIdInfoColumn] =
+        std::to_string(icebergSplit->firstRowId);
+  }
 
   return std::make_unique<velox::connector::hive::iceberg::HiveIcebergSplit>(
       catalogId,
@@ -244,11 +275,10 @@ IcebergPrestoToVeloxConnector::toVeloxColumnHandle(
   //  constructor similar to how Hive Connector is handling for bucketing
   velox::type::fbhive::HiveTypeParser hiveTypeParser;
   auto type = stringToType(icebergColumn->type, typeParser);
-  velox::connector::hive::HiveColumnHandle::ColumnParseParameters
-      columnParseParameters;
-  if (type->isDate()) {
-    columnParseParameters.partitionDateValueFormat = velox::connector::hive::
-        HiveColumnHandle::ColumnParseParameters::kDaysSinceEpoch;
+
+  std::optional<std::string> defaultValue;
+  if (icebergColumn->defaultValue) {
+    defaultValue = *icebergColumn->defaultValue;
   }
 
   return std::make_unique<velox::connector::hive::iceberg::IcebergColumnHandle>(
@@ -256,7 +286,8 @@ IcebergPrestoToVeloxConnector::toVeloxColumnHandle(
       toHiveColumnType(icebergColumn->columnType),
       type,
       toParquetField(icebergColumn->columnIdentity),
-      toRequiredSubfields(icebergColumn->requiredSubfields));
+      toRequiredSubfields(icebergColumn->requiredSubfields),
+      defaultValue);
 }
 
 std::unique_ptr<velox::connector::ConnectorTableHandle>
@@ -312,13 +343,42 @@ IcebergPrestoToVeloxConnector::toVeloxTableHandle(
   return toIcebergTableHandle(
       icebergLayout->domainPredicate,
       icebergLayout->remainingPredicate,
-      icebergLayout->pushdownFilterEnabled,
       tableName,
       icebergLayout->dataColumns,
       tableHandle,
       columnHandles,
       exprConverter,
       typeParser);
+}
+
+std::unique_ptr<velox::connector::ConnectorInsertTableHandle>
+IcebergPrestoToVeloxConnector::toVeloxInsertTableHandle(
+    const protocol::ExecuteProcedureHandle* executeProcedureHandle,
+    const TypeParser& typeParser) const {
+  auto icebergDistributedProcedureHandle = std::dynamic_pointer_cast<
+      protocol::iceberg::IcebergDistributedProcedureHandle>(
+      executeProcedureHandle->handle.connectorHandle);
+
+  VELOX_CHECK_NOT_NULL(
+      icebergDistributedProcedureHandle,
+      "Unexpected call distributed procedure handle type {}",
+      executeProcedureHandle->handle.connectorHandle->_type);
+
+  const auto inputColumns = toIcebergColumns(
+      icebergDistributedProcedureHandle->inputColumns, typeParser);
+
+  return std::make_unique<
+      velox::connector::hive::iceberg::IcebergInsertTableHandle>(
+      inputColumns,
+      std::make_shared<velox::connector::hive::LocationHandle>(
+          fmt::format("{}/data", icebergDistributedProcedureHandle->outputPath),
+          fmt::format("{}/data", icebergDistributedProcedureHandle->outputPath),
+          velox::connector::hive::LocationHandle::TableType::kExisting),
+      toVeloxFileFormat(icebergDistributedProcedureHandle->fileFormat),
+      toVeloxIcebergPartitionSpec(
+          icebergDistributedProcedureHandle->partitionSpec, typeParser),
+      std::optional(toFileCompressionKind(
+          icebergDistributedProcedureHandle->compressionCodec)));
 }
 
 std::unique_ptr<protocol::ConnectorProtocol>

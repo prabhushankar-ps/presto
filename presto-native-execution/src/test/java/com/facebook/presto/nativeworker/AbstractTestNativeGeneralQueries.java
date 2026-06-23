@@ -1009,7 +1009,7 @@ public abstract class AbstractTestNativeGeneralQueries
         // Reverse
         assertQuery("SELECT comment, reverse(comment) FROM orders");
 
-        // Normalize
+        // Normalize, key_sampling_percent.
         String tmpTableName = generateRandomTableName();
         try {
             getQueryRunner().execute(String.format("CREATE TABLE %s (c0 VARCHAR)", tmpTableName));
@@ -1023,10 +1023,43 @@ public abstract class AbstractTestNativeGeneralQueries
             assertQuery("SELECT normalize(comment, NFD) FROM nation");
             assertQuery(String.format("SELECT normalize(c0) from %s", tmpTableName));
             assertQuery(String.format("SELECT normalize(c0, NFKD) from %s", tmpTableName));
+            getQueryRunner().execute(String.format("INSERT INTO %s VALUES " +
+                    "(NULL), " +
+                    "('abc'), " +
+                    "('abcdefghskwkjadhwd'), " +
+                    "('001yxzuj'), " +
+                    "('56wfythjhdhvgewuikwemn'), " +
+                    "('special_#@,$|%%/^~?{}+-'), " +
+                    "('     '), " +
+                    "(''), " +
+                    "('Hello World from Velox!')", tmpTableName));
+            assertQuery(String.format("SELECT key_sampling_percent(c0) FROM %s", tmpTableName));
         }
         finally {
             dropTableIfExists(tmpTableName);
         }
+
+        // bit_length
+        assertQuery("SELECT bit_length(comment) FROM orders");
+        assertQuery("SELECT bit_length(name) FROM nation");
+        assertQuery("SELECT bit_length(shipmode) FROM lineitem");
+        assertQuery("SELECT bit_length(c0) FROM (VALUES ('abc'), (CAST(NULL AS VARCHAR)), ('')) as t (c0)");
+        assertQuery("SELECT bit_length(IF(nationkey % 2 = 0, name, NULL)) FROM nation");
+
+        // longest_common_prefix
+        assertQuery("SELECT longest_common_prefix(name, 'UNITED') FROM nation WHERE name LIKE 'UNITED%' ORDER BY name");
+        assertQuery("SELECT longest_common_prefix(comment, comment) FROM orders ORDER BY orderkey LIMIT 10");
+        assertQuery("SELECT longest_common_prefix('', ''), longest_common_prefix('hello', 'hello world') FROM (VALUES 1)", "SELECT '', 'hello'");
+        assertQuery("SELECT longest_common_prefix(IF(nationkey % 2 = 0, name, NULL), 'UNITED') FROM nation");
+        assertQuery("SELECT longest_common_prefix(c0, c1) FROM (VALUES ('hello', 'help'), (CAST(NULL AS VARCHAR), 'x'), ('x', CAST(NULL AS VARCHAR))) as t (c0, c1)");
+
+        // replace_first
+        assertQuery("SELECT replace_first(comment, 'the', 'THE') FROM orders ORDER BY orderkey LIMIT 10");
+        assertQuery("SELECT replace_first(name, 'A', 'X') FROM nation ORDER BY nationkey LIMIT 10");
+        assertQuery("SELECT replace_first('aaa', 'a', 'b') FROM (VALUES 1)", "SELECT 'baa'");
+        assertQuery("SELECT replace_first(comment, ' ', '') FROM orders ORDER BY orderkey LIMIT 10");
+        assertQuery("SELECT replace_first(c0, c1, c2) FROM (VALUES ('aaa', 'a', 'b'), (CAST(NULL AS VARCHAR), 'a', 'b'), ('aaa', CAST(NULL AS VARCHAR), 'b'), ('aaa', 'a', CAST(NULL AS VARCHAR))) as t (c0, c1, c2)");
+        assertQuery("SELECT replace_first(IF(nationkey % 2 = 0, name, NULL), 'A', 'X') FROM nation");
     }
 
     @Test
@@ -1034,6 +1067,9 @@ public abstract class AbstractTestNativeGeneralQueries
     {
         // crc32.
         assertQuery("SELECT crc32(cast(comment as varbinary)) FROM orders");
+
+        // length.
+        assertQuery("SELECT length(cast(comment as varbinary)) FROM orders ORDER BY orderkey LIMIT 10");
 
         // from_base64, to_base64.
         assertQuery("SELECT from_base64(to_base64(cast(comment as varbinary))) FROM orders");
@@ -1080,7 +1116,8 @@ public abstract class AbstractTestNativeGeneralQueries
         // from_hex, to_hex.
         assertQuery("SELECT from_hex(to_hex(cast(comment as varbinary))) FROM orders");
 
-        // hmac_sha1, hmac_sha256, hmac_sha512.
+        // hmac_md5, hmac_sha1, hmac_sha256, hmac_sha512.
+        assertQuery("SELECT hmac_md5(cast(comment as varbinary), cast(clerk as varbinary)) FROM orders ORDER BY orderkey LIMIT 10");
         assertQuery("SELECT hmac_sha1(cast(comment as varbinary), cast(clerk as varbinary)) FROM orders");
         assertQuery("SELECT hmac_sha256(cast(comment as varbinary), cast(clerk as varbinary)) FROM orders");
         assertQuery("SELECT hmac_sha512(cast(comment as varbinary), cast(clerk as varbinary)) FROM orders");
@@ -1099,6 +1136,14 @@ public abstract class AbstractTestNativeGeneralQueries
 
         // xxhash64.
         assertQuery("SELECT xxhash64(cast(comment as varbinary)) FROM orders");
+        assertQuery("SELECT xxhash64(cast(comment as varbinary), orderkey) FROM orders ORDER BY orderkey LIMIT 10");
+
+        // lpad, rpad.
+        assertQuery("SELECT lpad(cast(comment as varbinary), 50, cast('x' as varbinary)) FROM orders ORDER BY orderkey LIMIT 10");
+        assertQuery("SELECT rpad(cast(comment as varbinary), 50, cast('x' as varbinary)) FROM orders ORDER BY orderkey LIMIT 10");
+
+        // murmur3_x64_128.
+        assertQuery("SELECT murmur3_x64_128(cast(comment as varbinary)) FROM orders ORDER BY orderkey LIMIT 10");
 
         // from_base64url, to_base64url
         assertQuery("SELECT from_base64url(to_base64url(cast(comment as varbinary))) FROM orders");

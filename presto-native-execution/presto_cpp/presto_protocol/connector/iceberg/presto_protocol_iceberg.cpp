@@ -174,6 +174,20 @@ void to_json(json& j, const IcebergColumnHandle& p) {
       "IcebergColumnHandle",
       "List<Subfield>",
       "requiredSubfields");
+  to_json_key(
+      j,
+      "defaultValue",
+      p.defaultValue,
+      "IcebergColumnHandle",
+      "String",
+      "defaultValue");
+  to_json_key(
+      j,
+      "writeDefaultValue",
+      p.writeDefaultValue,
+      "IcebergColumnHandle",
+      "String",
+      "writeDefaultValue");
 }
 
 void from_json(const json& j, IcebergColumnHandle& p) {
@@ -202,6 +216,20 @@ void from_json(const json& j, IcebergColumnHandle& p) {
       "IcebergColumnHandle",
       "List<Subfield>",
       "requiredSubfields");
+  from_json_key(
+      j,
+      "defaultValue",
+      p.defaultValue,
+      "IcebergColumnHandle",
+      "String",
+      "defaultValue");
+  from_json_key(
+      j,
+      "writeDefaultValue",
+      p.writeDefaultValue,
+      "IcebergColumnHandle",
+      "String",
+      "writeDefaultValue");
 }
 } // namespace facebook::presto::protocol::iceberg
 namespace facebook::presto::protocol::iceberg {
@@ -306,7 +334,8 @@ static const std::pair<FileFormat, json> FileFormat_enum_table[] =
         {FileFormat::ORC, "ORC"},
         {FileFormat::PARQUET, "PARQUET"},
         {FileFormat::AVRO, "AVRO"},
-        {FileFormat::METADATA, "METADATA"}};
+        {FileFormat::METADATA, "METADATA"},
+        {FileFormat::PUFFIN, "PUFFIN"}};
 void to_json(json& j, const FileFormat& e) {
   static_assert(std::is_enum<FileFormat>::value, "FileFormat must be an enum!");
   const auto* it = std::find_if(
@@ -511,6 +540,13 @@ void to_json(json& j, const IcebergTableName& p) {
       j, "snapshotId", p.snapshotId, "IcebergTableName", "Long", "snapshotId");
   to_json_key(
       j,
+      "branchName",
+      p.branchName,
+      "IcebergTableName",
+      "String",
+      "branchName");
+  to_json_key(
+      j,
       "changelogEndSnapshot",
       p.changelogEndSnapshot,
       "IcebergTableName",
@@ -530,6 +566,13 @@ void from_json(const json& j, IcebergTableName& p) {
       "tableType");
   from_json_key(
       j, "snapshotId", p.snapshotId, "IcebergTableName", "Long", "snapshotId");
+  from_json_key(
+      j,
+      "branchName",
+      p.branchName,
+      "IcebergTableName",
+      "String",
+      "branchName");
   from_json_key(
       j,
       "changelogEndSnapshot",
@@ -1378,6 +1421,20 @@ void to_json(json& j, const IcebergInsertTableHandle& p) {
       "IcebergInsertTableHandle",
       "SchemaTableName",
       "materializedViewName");
+  to_json_key(
+      j,
+      "fullRefreshRequired",
+      p.fullRefreshRequired,
+      "IcebergInsertTableHandle",
+      "bool",
+      "fullRefreshRequired");
+  to_json_key(
+      j,
+      "insertedColumns",
+      p.insertedColumns,
+      "IcebergInsertTableHandle",
+      "List<String>",
+      "insertedColumns");
 }
 
 void from_json(const json& j, IcebergInsertTableHandle& p) {
@@ -1459,6 +1516,20 @@ void from_json(const json& j, IcebergInsertTableHandle& p) {
       "IcebergInsertTableHandle",
       "SchemaTableName",
       "materializedViewName");
+  from_json_key(
+      j,
+      "fullRefreshRequired",
+      p.fullRefreshRequired,
+      "IcebergInsertTableHandle",
+      "bool",
+      "fullRefreshRequired");
+  from_json_key(
+      j,
+      "insertedColumns",
+      p.insertedColumns,
+      "IcebergInsertTableHandle",
+      "List<String>",
+      "insertedColumns");
 }
 } // namespace facebook::presto::protocol::iceberg
 namespace facebook::presto::protocol::iceberg {
@@ -1692,6 +1763,8 @@ void to_json(json& j, const IcebergSplit& p) {
       "int64_t",
       "dataSequenceNumber");
   to_json_key(
+      j, "firstRowId", p.firstRowId, "IcebergSplit", "int64_t", "firstRowId");
+  to_json_key(
       j,
       "affinitySchedulingSectionSize",
       p.affinitySchedulingSectionSize,
@@ -1770,6 +1843,8 @@ void from_json(const json& j, IcebergSplit& p) {
       "IcebergSplit",
       "int64_t",
       "dataSequenceNumber");
+  from_json_key(
+      j, "firstRowId", p.firstRowId, "IcebergSplit", "int64_t", "firstRowId");
   from_json_key(
       j,
       "affinitySchedulingSectionSize",

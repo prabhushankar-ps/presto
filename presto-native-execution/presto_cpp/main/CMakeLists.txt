@@ -17,10 +17,7 @@ add_subdirectory(thrift)
 add_subdirectory(connectors)
 add_subdirectory(functions)
 add_subdirectory(tool)
-
-add_library(presto_session_properties SessionProperties.cpp)
-
-target_link_libraries(presto_session_properties ${FOLLY_WITH_DEPENDENCIES})
+add_subdirectory(properties)
 
 add_library(
   presto_server_lib
@@ -86,11 +83,13 @@ target_link_libraries(
   velox_dynamic_library_loader
   velox_encode
   velox_exec
+  velox_rpc_plan_node_translator
   velox_file
   velox_functions_lib
   velox_functions_prestosql
   velox_gcs
   velox_hdfs
+  velox_connector_registry
   velox_hive_connector
   velox_hive_iceberg_splitreader
   velox_hive_partition_function
@@ -120,8 +119,6 @@ endif()
 # likely due to a conflict between Arrow Thrift from velox_hive_connector and
 # FBThrift libraries. The build issue is fixed by linking velox_hive_connector
 # dependencies first followed by FBThrift.
-target_link_libraries(presto_server_lib presto_thrift-cpp2 presto_thrift_extra ${THRIFT_LIBRARY})
-
 if(PRESTO_ENABLE_REMOTE_FUNCTIONS)
   add_library(presto_server_remote_function JsonSignatureParser.cpp RemoteFunctionRegisterer.cpp)
 
@@ -133,6 +130,8 @@ if(PRESTO_ENABLE_REMOTE_FUNCTIONS)
   )
   target_link_libraries(presto_server_lib presto_server_remote_function)
 endif()
+
+target_link_libraries(presto_server_lib presto_thrift-cpp2 presto_thrift_extra ${THRIFT_LIBRARY})
 
 set_property(TARGET presto_server_lib PROPERTY JOB_POOL_LINK presto_link_job_pool)
 
